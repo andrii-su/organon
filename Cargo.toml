@@ -1,0 +1,7 @@
+[workspace]
+members = [
+    "crates/organon-core",
+    "crates/organon-mcp",
+    "crates/organon-cli",
+]
+resolver = "2"
