@@ -40,6 +40,18 @@ def upsert_relations(
     logger.debug("upsert_relations: %d relations stored", len(relations))
 
 
+def delete_relations_from(path: str, db_path=DB_PATH) -> int:
+    """Delete all outgoing edges from path before re-extracting relations."""
+    with _db(db_path) as conn:
+        cursor = conn.execute(
+            "DELETE FROM relationships WHERE from_path = ?",
+            (path,),
+        )
+        deleted = cursor.rowcount or 0
+    logger.debug("delete_relations_from: %d relations removed for %s", deleted, path)
+    return deleted
+
+
 # ── read ──────────────────────────────────────────────────────────────────────
 
 def get_relations(path: str, db_path=DB_PATH) -> list[dict]:
