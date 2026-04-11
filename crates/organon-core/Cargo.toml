@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-notify = "6"
+notify = "8"
 tokio = { version = "1", features = ["full"] }
 rusqlite = { version = "0.39", features = ["bundled"] }
 log = "0.4"
