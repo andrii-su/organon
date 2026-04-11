@@ -147,3 +147,31 @@ def get_indexed_hashes(db_path: str | None = None) -> set[str]:
     except Exception as e:
         logger.warning("get_indexed_hashes failed: %s", e)
         return set()
+
+
+def get_all_entries(db_path: str | None = None) -> list[dict]:
+    """Return all (path, content_hash) pairs stored in the vector store."""
+    try:
+        table = _get_table(db_path)
+        rows = table.search().select(["path", "content_hash"]).limit(100_000).to_list()
+        return [{"path": r["path"], "content_hash": r["content_hash"]} for r in rows]
+    except Exception as e:
+        logger.warning("get_all_entries failed: %s", e)
+        return []
+
+
+def update_path_in_store(old_path: str, new_path: str, db_path: str | None = None) -> bool:
+    """Update the path field for a lancedb row whose path == old_path.
+
+    Returns True if the update succeeded, False otherwise.
+    """
+    try:
+        table = _get_table(db_path)
+        # Escape single quotes in path strings to avoid injection in the SQL fragment.
+        old_escaped = old_path.replace("'", "''")
+        table.update(where=f"path = '{old_escaped}'", values={"path": new_path})
+        logger.debug("update_path_in_store: %s → %s", old_path, new_path)
+        return True
+    except Exception as e:
+        logger.warning("update_path_in_store failed %s → %s: %s", old_path, new_path, e)
+        return False
