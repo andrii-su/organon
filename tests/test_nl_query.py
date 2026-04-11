@@ -1,6 +1,5 @@
 """Tests for ai/query/nl_query.py (mocks ollama)."""
 import sqlite3
-from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -8,7 +7,6 @@ import pytest
 from ai.query.nl_query import (
     _extract_sql,
     _validate_sql,
-    generate_sql,
     run_nl_query,
 )
 

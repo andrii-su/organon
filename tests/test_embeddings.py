@@ -1,6 +1,4 @@
 """Tests for embeddings store."""
-import tempfile
-import time
 
 import pytest
 

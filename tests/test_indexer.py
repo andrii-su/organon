@@ -1,7 +1,6 @@
 """Tests for ai/indexer.py — run_once logic."""
 import sqlite3
-from pathlib import Path
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -66,7 +65,7 @@ def test_get_entities_returns_active(tmp_db):
 # ── run_once ──────────────────────────────────────────────────────────────────
 
 def test_run_once_indexes_new_files(tmp_db, tmp_path):
-    vec_db = str(tmp_path / "vectors")
+    str(tmp_path / "vectors")
     with (
         patch("ai.indexer.extract_text", return_value="some content"),
         patch("ai.indexer.index_file") as mock_index,
@@ -121,7 +120,7 @@ def test_run_once_skips_empty_text(tmp_db):
         patch("ai.indexer.extract_relations", return_value=[]),
         patch("ai.indexer.upsert_relations"),
     ):
-        stats = run_once(tmp_db)
+        run_once(tmp_db)
 
     assert mock_index.call_count == 0
 

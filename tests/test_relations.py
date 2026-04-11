@@ -1,11 +1,9 @@
 """Tests for ai/relations/ — extraction and graph store."""
 import sqlite3
-import tempfile
 from pathlib import Path
 
-import pytest
 
-from ai.relations.extract import extract_relations, _extract_python, _extract_rust, _extract_ts
+from ai.relations.extract import extract_relations
 from ai.relations.store import get_graph, get_relations, upsert_relations
 
 
