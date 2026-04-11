@@ -154,7 +154,7 @@ enum Cmd {
 
     /// Semantic search (requires Python + indexer)
     #[command(
-        after_long_help = "Examples:\n  organon search \"sqlite graph\"\n  organon search \"imports\" --state active --ext rs\n  organon search \"watcher\" --modified-after 2026-01-01 --mode hybrid"
+        after_long_help = "Examples:\n  organon search \"sqlite graph\"\n  organon search \"imports\" --state active --ext rs\n  organon search \"watcher\" --modified-after 2026-01-01 --mode hybrid\n  organon search \"auth token\" --mode hybrid --explain"
     )]
     Search {
         query: String,
@@ -179,6 +179,10 @@ enum Cmd {
 
         #[arg(long, value_name = "YYYY-MM-DD")]
         modified_after: Option<String>,
+
+        /// Show why each result ranked: score breakdown, matched terms, semantic signal
+        #[arg(long)]
+        explain: bool,
     },
 
     /// Run the Python indexer
@@ -309,6 +313,7 @@ fn main() -> Result<()> {
             extension,
             created_after,
             modified_after,
+            explain,
         } => cmd_search(
             &query,
             limit,
@@ -318,6 +323,7 @@ fn main() -> Result<()> {
             extension,
             created_after,
             modified_after,
+            explain,
             &config,
             &db_path,
         ),
@@ -698,6 +704,7 @@ fn cmd_search(
     extension: Option<String>,
     created_after: Option<String>,
     modified_after: Option<String>,
+    explain: bool,
     config: &OrgConfig,
     db_path: &PathBuf,
 ) -> Result<()> {
@@ -714,8 +721,8 @@ fn cmd_search(
         0,
     )?;
     info!(
-        "search: {:?} limit={} dir={:?} mode={:?}",
-        query, limit, dir, mode
+        "search: {:?} limit={} dir={:?} mode={:?} explain={}",
+        query, limit, dir, mode, explain
     );
     let results = search_entities(
         query,
@@ -726,6 +733,7 @@ fn cmd_search(
         &metadata_filter,
         config,
         db_path,
+        explain,
     )?;
 
     if results.items.is_empty() {
@@ -733,10 +741,26 @@ fn cmd_search(
         return Ok(());
     }
 
-    println!("{:<6}  {:<7}  PATH", "SCORE", "SOURCE");
-    println!("{}", "-".repeat(96));
-    for hit in results.items {
-        println!("{:.3}   {:<7}  {}", hit.score, hit.source, hit.path);
+    if explain {
+        for hit in &results.items {
+            println!("{:.3}  {}  {}", hit.score, hit.source, hit.path);
+            if let Some(exp) = &hit.explanation {
+                for reason in &exp.reasons {
+                    println!("  → {reason}");
+                }
+                if let Some(preview) = &exp.text_preview {
+                    let snippet: String = preview.chars().take(120).collect();
+                    println!("  preview: {snippet}");
+                }
+            }
+            println!();
+        }
+    } else {
+        println!("{:<6}  {:<7}  PATH", "SCORE", "SOURCE");
+        println!("{}", "-".repeat(96));
+        for hit in results.items {
+            println!("{:.3}   {:<7}  {}", hit.score, hit.source, hit.path);
+        }
     }
     Ok(())
 }

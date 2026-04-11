@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use anyhow::Result;
 use log::{debug, info, warn};
 use rusqlite::{params, params_from_iter, types::Value, Connection};
@@ -6,6 +8,18 @@ use crate::entity::{Entity, LifecycleState};
 
 pub struct Graph {
     conn: Connection,
+}
+
+/// Outcome of a `rename_entity` call.
+#[derive(Debug, PartialEq)]
+pub enum RenameOutcome {
+    /// Entity successfully renamed; no conflict at new path.
+    Renamed,
+    /// `old_path` was not found in the graph; nothing changed.
+    OldNotFound,
+    /// `new_path` already existed (OS rename overwrote it); the entity at
+    /// `new_path` was removed and `old_path`'s entity now lives at `new_path`.
+    ConflictResolved,
 }
 
 /// Filter for `Graph::find()`.
@@ -60,6 +74,7 @@ impl Graph {
             );
             CREATE INDEX IF NOT EXISTS idx_rel_from ON relationships(from_path);
             CREATE INDEX IF NOT EXISTS idx_rel_to   ON relationships(to_path);
+            CREATE INDEX IF NOT EXISTS idx_entities_hash ON entities(content_hash);
 
             CREATE VIRTUAL TABLE IF NOT EXISTS entities_fts USING fts5(
                 path UNINDEXED,
@@ -227,6 +242,106 @@ impl Graph {
             params![path, summary],
         )?;
         Ok(())
+    }
+
+    /// Return all entities whose `content_hash` matches. Used for rename detection.
+    pub fn get_by_hash(&self, content_hash: &str) -> Result<Vec<Entity>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, path, name, extension, size_bytes, created_at, modified_at,
+                    accessed_at, lifecycle, content_hash, summary, git_author
+             FROM entities WHERE content_hash = ?1",
+        )?;
+        let rows = stmt.query_map(params![content_hash], |row| row_to_entity(row))?;
+        let entities: rusqlite::Result<Vec<_>> = rows.collect();
+        Ok(entities?)
+    }
+
+    /// Rename an entity from `old_path` to `new_path` in-place, preserving id,
+    /// summary, lifecycle, created_at, and all relationships.
+    ///
+    /// If `new_path` already exists in the graph the entity there is removed
+    /// first (it was overwritten by the OS rename).
+    ///
+    /// Relationships are updated with INSERT-OR-IGNORE + DELETE to handle
+    /// duplicate-path edge cases without violating the PRIMARY KEY constraint.
+    pub fn rename_entity(&self, old_path: &str, new_path: &str) -> Result<RenameOutcome> {
+        debug!("rename_entity: {} → {}", old_path, new_path);
+
+        if self.get_by_path(old_path)?.is_none() {
+            warn!("rename_entity: old path not found: {}", old_path);
+            return Ok(RenameOutcome::OldNotFound);
+        }
+
+        // ── handle conflict at new_path ───────────────────────────────────────
+        let conflict_resolved = if self.get_by_path(new_path)?.is_some() {
+            info!(
+                "rename_entity: new_path exists (overwritten by OS rename), removing: {}",
+                new_path
+            );
+            self.conn.execute(
+                "DELETE FROM relationships WHERE from_path = ?1 OR to_path = ?1",
+                params![new_path],
+            )?;
+            self.conn
+                .execute("DELETE FROM entities WHERE path = ?1", params![new_path])?;
+            self.conn.execute(
+                "DELETE FROM entities_fts WHERE path = ?1",
+                params![new_path],
+            )?;
+            true
+        } else {
+            false
+        };
+
+        // ── derive new name / extension from new_path ─────────────────────────
+        let new_name = Path::new(new_path)
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let new_ext: Option<String> = Path::new(new_path)
+            .extension()
+            .map(|e| e.to_string_lossy().to_string());
+
+        // ── update entity row ─────────────────────────────────────────────────
+        self.conn.execute(
+            "UPDATE entities SET path = ?2, name = ?3, extension = ?4 WHERE path = ?1",
+            params![old_path, new_path, new_name, new_ext],
+        )?;
+
+        // ── cascade rename to relationships ───────────────────────────────────
+        // Use INSERT OR IGNORE + DELETE so that if (new_path, Y, K) already
+        // existed the old (old_path, Y, K) edge is simply dropped without
+        // violating the PRIMARY KEY constraint.
+
+        // from_path side
+        self.conn.execute(
+            "INSERT OR IGNORE INTO relationships (from_path, to_path, kind, created_at)
+             SELECT ?2, to_path, kind, created_at FROM relationships WHERE from_path = ?1",
+            params![old_path, new_path],
+        )?;
+        // to_path side
+        self.conn.execute(
+            "INSERT OR IGNORE INTO relationships (from_path, to_path, kind, created_at)
+             SELECT from_path, ?2, kind, created_at FROM relationships WHERE to_path = ?1",
+            params![old_path, new_path],
+        )?;
+        // remove old edges
+        self.conn.execute(
+            "DELETE FROM relationships WHERE from_path = ?1 OR to_path = ?1",
+            params![old_path],
+        )?;
+
+        // ── drop stale FTS entry (indexer re-adds under new path) ─────────────
+        self.conn
+            .execute("DELETE FROM entities_fts WHERE path = ?1", params![old_path])?;
+
+        info!("renamed entity: {} → {}", old_path, new_path);
+
+        if conflict_resolved {
+            Ok(RenameOutcome::ConflictResolved)
+        } else {
+            Ok(RenameOutcome::Renamed)
+        }
     }
 
     // ── relationships ─────────────────────────────────────────────────────────

@@ -103,6 +103,7 @@ struct SearchQuery {
     ext: Option<String>,
     created_after: Option<String>,
     modified_after: Option<String>,
+    explain: Option<bool>,
 }
 
 #[derive(Debug, Serialize)]
@@ -300,7 +301,8 @@ async fn openapi_json() -> Json<Value> {
                         query_param("extension", "File extension without leading dot", false, json!({"type": "string"})),
                         query_param("ext", "Alias for extension", false, json!({"type": "string"})),
                         query_param("created_after", "Only files created after YYYY-MM-DD", false, json!({"type": "string", "format": "date"})),
-                        query_param("modified_after", "Only files modified after YYYY-MM-DD", false, json!({"type": "string", "format": "date"}))
+                        query_param("modified_after", "Only files modified after YYYY-MM-DD", false, json!({"type": "string", "format": "date"})),
+                        query_param("explain", "Include per-hit explanation block (score breakdown, matched terms, reasons)", false, json!({"type": "boolean", "default": false}))
                     ],
                     "responses": {
                         "200": json_response("Paginated search hits", ref_schema("SearchPage")),
@@ -655,6 +657,7 @@ async fn search(
         offset,
     )?;
 
+    let explain = query.explain.unwrap_or(false);
     let result = tokio::task::spawn_blocking(move || {
         search_entities(
             &q,
@@ -665,6 +668,7 @@ async fn search(
             &metadata_filter,
             &config,
             &db_path,
+            explain,
         )
     })
     .await
