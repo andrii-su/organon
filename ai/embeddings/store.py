@@ -1,5 +1,6 @@
 """Local vector store using fastembed + lancedb."""
 import logging
+import os
 import time
 from pathlib import Path
 from typing import Any
@@ -8,30 +9,37 @@ import pyarrow as pa
 
 logger = logging.getLogger(__name__)
 
-DB_PATH = "~/.organon/vectors"
+DEFAULT_DB_PATH = "~/.organon/vectors"
 TABLE_NAME = "entities"
 
 # BAAI/bge-small-en-v1.5 — 384 dims, ~130MB, fast on CPU
-EMBED_MODEL = "BAAI/bge-small-en-v1.5"
+DEFAULT_EMBED_MODEL = "BAAI/bge-small-en-v1.5"
 EMBED_DIM = 384
 
 _model = None  # lazy singleton
+_model_name = None
 
 
 def _get_model():
-    global _model
-    if _model is None:
-        logger.info("loading embedding model: %s", EMBED_MODEL)
+    global _model, _model_name
+    model_name = os.environ.get("ORGANON_EMBED_MODEL", DEFAULT_EMBED_MODEL)
+    if _model is None or _model_name != model_name:
+        logger.info("loading embedding model: %s", model_name)
         from fastembed import TextEmbedding
-        _model = TextEmbedding(model_name=EMBED_MODEL)
+        _model = TextEmbedding(model_name=model_name)
+        _model_name = model_name
         logger.info("embedding model loaded")
     return _model
 
 
-def _get_table(db_path: str = DB_PATH):
+def _resolve_db_path(db_path: str | None = None) -> str:
+    return db_path or os.environ.get("ORGANON_VECTORS_DB", DEFAULT_DB_PATH)
+
+
+def _get_table(db_path: str | None = None):
     import lancedb
 
-    path = Path(db_path).expanduser()
+    path = Path(_resolve_db_path(db_path)).expanduser()
     path.mkdir(parents=True, exist_ok=True)
     db = lancedb.connect(str(path))
 
@@ -55,7 +63,7 @@ def embed_text(text: str) -> list[float]:
     return embeddings[0].tolist()
 
 
-def index_file(path: str, text: str, content_hash: str, db_path: str = DB_PATH) -> None:
+def index_file(path: str, text: str, content_hash: str, db_path: str | None = None) -> None:
     """Embed and store a file. Skips if content_hash already indexed."""
     table = _get_table(db_path)
 
@@ -93,7 +101,7 @@ def index_file(path: str, text: str, content_hash: str, db_path: str = DB_PATH) 
 def search(
     query: str,
     limit: int = 10,
-    db_path: str = DB_PATH,
+    db_path: str | None = None,
     path_prefix: str | None = None,
 ) -> list[dict[str, Any]]:
     """Semantic search. Returns list of {path, score, text_preview}.
@@ -128,7 +136,7 @@ def search(
     ]
 
 
-def get_indexed_hashes(db_path: str = DB_PATH) -> set[str]:
+def get_indexed_hashes(db_path: str | None = None) -> set[str]:
     """Return all content_hashes currently in the vector store."""
     try:
         table = _get_table(db_path)
