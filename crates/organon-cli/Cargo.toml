@@ -20,7 +20,7 @@ log = "0.4"
 clap_complete = "4"
 axum = { version = "0.8", features = ["ws"] }
 tower = { version = "0.5", features = ["util"] }
-tower-http = { version = "0.5", features = ["cors"] }
+tower-http = { version = "0.6", features = ["cors"] }
 tokio = { version = "1", features = ["full"] }
 walkdir = "2"
 
