@@ -1,7 +1,7 @@
 use std::fs;
 use std::sync::{Arc, Mutex};
 
-use organon_core::{graph::Graph, scanner};
+use organon_core::{graph::Graph, ignore::IgnoreSet, scanner};
 use tempfile::{NamedTempFile, TempDir};
 
 fn temp_graph() -> (Arc<Mutex<Graph>>, NamedTempFile) {
@@ -14,7 +14,9 @@ fn temp_graph() -> (Arc<Mutex<Graph>>, NamedTempFile) {
 
 #[test]
 fn ignores_git_dir() {
-    assert!(scanner::is_ignored(std::path::Path::new("/repo/.git/config")));
+    assert!(scanner::is_ignored(std::path::Path::new(
+        "/repo/.git/config"
+    )));
 }
 
 #[test]
@@ -58,10 +60,17 @@ fn does_not_ignore_ai_dir() {
 fn scan_indexes_files() {
     let dir = TempDir::new().unwrap();
     fs::write(dir.path().join("a.txt"), "hello").unwrap();
-    fs::write(dir.path().join("b.rs"),  "fn main() {}").unwrap();
+    fs::write(dir.path().join("b.rs"), "fn main() {}").unwrap();
 
     let (graph, _f) = temp_graph();
-    let stats = scanner::scan(dir.path().to_str().unwrap(), Arc::clone(&graph)).unwrap();
+    let ignore_set = IgnoreSet::load(dir.path(), &[]);
+    let stats = scanner::scan(
+        dir.path().to_str().unwrap(),
+        Arc::clone(&graph),
+        &ignore_set,
+        false,
+    )
+    .unwrap();
 
     assert_eq!(stats.indexed, 2);
     assert_eq!(stats.errors, 0);
@@ -80,7 +89,14 @@ fn scan_skips_ignored_dirs() {
     fs::write(git_dir.join("config"), "[core]").unwrap();
 
     let (graph, _f) = temp_graph();
-    let stats = scanner::scan(dir.path().to_str().unwrap(), Arc::clone(&graph)).unwrap();
+    let ignore_set = IgnoreSet::load(dir.path(), &[]);
+    let stats = scanner::scan(
+        dir.path().to_str().unwrap(),
+        Arc::clone(&graph),
+        &ignore_set,
+        false,
+    )
+    .unwrap();
 
     // only src.rs, not .git/config
     assert_eq!(stats.indexed, 1);
@@ -92,8 +108,21 @@ fn scan_second_run_upserts_not_duplicates() {
     fs::write(dir.path().join("x.txt"), "content").unwrap();
 
     let (graph, _f) = temp_graph();
-    scanner::scan(dir.path().to_str().unwrap(), Arc::clone(&graph)).unwrap();
-    scanner::scan(dir.path().to_str().unwrap(), Arc::clone(&graph)).unwrap();
+    let ignore_set = IgnoreSet::load(dir.path(), &[]);
+    scanner::scan(
+        dir.path().to_str().unwrap(),
+        Arc::clone(&graph),
+        &ignore_set,
+        false,
+    )
+    .unwrap();
+    scanner::scan(
+        dir.path().to_str().unwrap(),
+        Arc::clone(&graph),
+        &ignore_set,
+        false,
+    )
+    .unwrap();
 
     let all = graph.lock().unwrap().all().unwrap();
     assert_eq!(all.len(), 1);
