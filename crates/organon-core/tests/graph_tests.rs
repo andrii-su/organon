@@ -323,9 +323,13 @@ fn rename_entity_updates_outgoing_relations() {
     let (graph, _f) = temp_graph();
     graph.upsert(&test_entity("/tmp/src.rs")).unwrap();
     graph.upsert(&test_entity("/tmp/dep.rs")).unwrap();
-    graph.upsert_relation("/tmp/src.rs", "/tmp/dep.rs", "mod").unwrap();
+    graph
+        .upsert_relation("/tmp/src.rs", "/tmp/dep.rs", "mod")
+        .unwrap();
 
-    graph.rename_entity("/tmp/src.rs", "/tmp/renamed_src.rs").unwrap();
+    graph
+        .rename_entity("/tmp/src.rs", "/tmp/renamed_src.rs")
+        .unwrap();
 
     let rels = graph.get_relations("/tmp/renamed_src.rs").unwrap();
     assert_eq!(rels.len(), 1);
@@ -341,9 +345,13 @@ fn rename_entity_updates_incoming_relations() {
     let (graph, _f) = temp_graph();
     graph.upsert(&test_entity("/tmp/caller.rs")).unwrap();
     graph.upsert(&test_entity("/tmp/target.rs")).unwrap();
-    graph.upsert_relation("/tmp/caller.rs", "/tmp/target.rs", "imports").unwrap();
+    graph
+        .upsert_relation("/tmp/caller.rs", "/tmp/target.rs", "imports")
+        .unwrap();
 
-    graph.rename_entity("/tmp/target.rs", "/tmp/target_v2.rs").unwrap();
+    graph
+        .rename_entity("/tmp/target.rs", "/tmp/target_v2.rs")
+        .unwrap();
 
     let rels = graph.get_relations("/tmp/target_v2.rs").unwrap();
     assert_eq!(rels.len(), 1);
@@ -355,7 +363,9 @@ fn rename_entity_updates_incoming_relations() {
 fn rename_entity_does_not_create_duplicate() {
     let (graph, _f) = temp_graph();
     graph.upsert(&test_entity("/tmp/orig.rs")).unwrap();
-    graph.rename_entity("/tmp/orig.rs", "/tmp/moved.rs").unwrap();
+    graph
+        .rename_entity("/tmp/orig.rs", "/tmp/moved.rs")
+        .unwrap();
 
     let all = graph.all().unwrap();
     assert_eq!(all.len(), 1, "rename must not create a duplicate entity");
@@ -376,7 +386,9 @@ fn rename_entity_over_existing_resolves_conflict() {
     graph.upsert(&old).unwrap();
     // new_path already exists (would be overwritten by OS rename)
     graph.upsert(&test_entity("/tmp/new.rs")).unwrap();
-    graph.upsert_relation("/tmp/caller.rs", "/tmp/new.rs", "mod").unwrap();
+    graph
+        .upsert_relation("/tmp/caller.rs", "/tmp/new.rs", "mod")
+        .unwrap();
 
     let outcome = graph.rename_entity("/tmp/old.rs", "/tmp/new.rs").unwrap();
     assert_eq!(outcome, RenameOutcome::ConflictResolved);
@@ -397,12 +409,18 @@ fn rename_preserves_relation_dedup() {
     graph.upsert(&test_entity("/tmp/src.rs")).unwrap();
     graph.upsert(&test_entity("/tmp/dep.rs")).unwrap();
     graph.upsert(&test_entity("/tmp/other.rs")).unwrap();
-    graph.upsert_relation("/tmp/src.rs", "/tmp/dep.rs", "mod").unwrap();
+    graph
+        .upsert_relation("/tmp/src.rs", "/tmp/dep.rs", "mod")
+        .unwrap();
     // also: src already imports other.rs (which is about to be renamed to dep.rs target)
     // Edge: some X already points to the new_path... set up a different scenario:
     // src has both (src→dep) and (src→other); rename other→dep2
-    graph.upsert_relation("/tmp/src.rs", "/tmp/other.rs", "mod").unwrap();
-    graph.rename_entity("/tmp/other.rs", "/tmp/dep2.rs").unwrap();
+    graph
+        .upsert_relation("/tmp/src.rs", "/tmp/other.rs", "mod")
+        .unwrap();
+    graph
+        .rename_entity("/tmp/other.rs", "/tmp/dep2.rs")
+        .unwrap();
 
     let rels = graph.get_relations("/tmp/src.rs").unwrap();
     assert_eq!(rels.len(), 2);

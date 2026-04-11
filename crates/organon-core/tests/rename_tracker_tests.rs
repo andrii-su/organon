@@ -16,7 +16,6 @@
 ///  4. Ambiguous: two removes with same hash, one create → NOT auto-matched.
 ///  5. Same path pushed and matched → NOT matched (path guard).
 ///  6. flush_expired actually deletes from the graph.
-
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -95,7 +94,10 @@ fn ambiguous_duplicate_hash_does_not_match() {
     tracker.push("/tmp/dup2.rs".to_string(), "same_hash".to_string());
 
     let matched = tracker.try_match("/tmp/new.rs", "same_hash");
-    assert_eq!(matched, None, "ambiguous (2 candidates) must not auto-match");
+    assert_eq!(
+        matched, None,
+        "ambiguous (2 candidates) must not auto-match"
+    );
 }
 
 #[test]

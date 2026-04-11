@@ -620,7 +620,9 @@ impl OrganonMcpServer {
         }
     }
 
-    #[tool(description = "Search files by semantic meaning. Returns structured results. Pass explain=true for per-hit score breakdown.")]
+    #[tool(
+        description = "Search files by semantic meaning. Returns structured results. Pass explain=true for per-hit score breakdown."
+    )]
     async fn search_files(
         &self,
         Parameters(req): Parameters<SearchFilesRequest>,
@@ -890,11 +892,20 @@ fn build_explanation(
     }
 
     if path_match {
-        reasons.push(format!("path contains query term(s): {}", matched_terms.join(", ")));
+        reasons.push(format!(
+            "path contains query term(s): {}",
+            matched_terms.join(", ")
+        ));
     }
 
     if let Some(vs) = entry.vector_raw_score {
-        let label = if vs >= 0.8 { "high" } else if vs >= 0.6 { "moderate" } else { "low" };
+        let label = if vs >= 0.8 {
+            "high"
+        } else if vs >= 0.6 {
+            "moderate"
+        } else {
+            "low"
+        };
         reasons.push(format!("{label} semantic similarity ({vs:.3})"));
     }
 
@@ -903,8 +914,16 @@ fn build_explanation(
         reasons.push(format!("{label} FTS match (score {fs:.3})"));
     }
 
-    let vector_weight = if matches!(mode, SearchMode::Hybrid) { 0.7 } else { 1.0 };
-    let fts_weight = if matches!(mode, SearchMode::Hybrid) { 0.3 } else { 1.0 };
+    let vector_weight = if matches!(mode, SearchMode::Hybrid) {
+        0.7
+    } else {
+        1.0
+    };
+    let fts_weight = if matches!(mode, SearchMode::Hybrid) {
+        0.3
+    } else {
+        1.0
+    };
 
     SearchExplanation {
         vector_score: entry.vector_raw_score,
@@ -1061,7 +1080,10 @@ mod tests {
             )
             .unwrap();
         assert_eq!(hits[0].path, "/tmp/graph.rs");
-        assert!(hits[0].explanation.is_none(), "explain=false should not attach explanation");
+        assert!(
+            hits[0].explanation.is_none(),
+            "explain=false should not attach explanation"
+        );
     }
 
     #[test]
@@ -1087,9 +1109,15 @@ mod tests {
             )
             .unwrap();
         assert_eq!(hits[0].path, "/tmp/graph.rs");
-        let exp = hits[0].explanation.as_ref().expect("explanation present when explain=true");
+        let exp = hits[0]
+            .explanation
+            .as_ref()
+            .expect("explanation present when explain=true");
         assert!(exp.fts_score.is_some(), "FTS hit should have fts_score");
-        assert!(exp.vector_score.is_none(), "FTS-only hit should not have vector_score");
+        assert!(
+            exp.vector_score.is_none(),
+            "FTS-only hit should not have vector_score"
+        );
         assert!(!exp.reasons.is_empty(), "reasons should be non-empty");
         assert!(
             exp.reasons.iter().any(|r| r.contains("full-text search")),

@@ -295,7 +295,10 @@ fn build_explanation(
     }
 
     if path_match {
-        reasons.push(format!("path contains query term(s): {}", matched_terms.join(", ")));
+        reasons.push(format!(
+            "path contains query term(s): {}",
+            matched_terms.join(", ")
+        ));
     }
 
     if let Some(vs) = entry.vector_raw_score {
@@ -439,7 +442,10 @@ mod tests {
             ..Default::default()
         };
         let exp = build_explanation("auth token", "/src/auth/token.rs", &entry, SearchMode::Fts);
-        assert!(!exp.matched_terms.is_empty(), "should match 'auth' and 'token' in path");
+        assert!(
+            !exp.matched_terms.is_empty(),
+            "should match 'auth' and 'token' in path"
+        );
         assert!(exp.path_match);
         assert!(exp.fts_score.is_some());
         assert!(exp.vector_score.is_none());
@@ -461,8 +467,14 @@ mod tests {
         assert!(exp.vector_score == Some(0.85));
         assert!(exp.fts_score.is_none());
         assert!(exp.text_preview.is_some());
-        assert!(exp.reasons.iter().any(|r| r.contains("semantic vector search")));
-        assert!(exp.reasons.iter().any(|r| r.contains("semantic similarity")));
+        assert!(exp
+            .reasons
+            .iter()
+            .any(|r| r.contains("semantic vector search")));
+        assert!(exp
+            .reasons
+            .iter()
+            .any(|r| r.contains("semantic similarity")));
     }
 
     #[test]
@@ -479,14 +491,16 @@ mod tests {
             fts_normalized_score: Some(fts_norm),
             text_preview: Some("graph entity search".to_string()),
         };
-        let exp =
-            build_explanation("graph search", "/src/graph.rs", &entry, SearchMode::Hybrid);
+        let exp = build_explanation("graph search", "/src/graph.rs", &entry, SearchMode::Hybrid);
         assert!(exp.vector_contribution.is_some());
         assert!(exp.fts_contribution.is_some());
         // In hybrid mode weights are 0.7 / 0.3
         assert!((exp.vector_contribution.unwrap() - raw_vec * 0.7).abs() < 1e-9);
         assert!((exp.fts_contribution.unwrap() - fts_norm * 0.3).abs() < 1e-9);
-        assert!(exp.reasons.iter().any(|r| r.contains("both vector and FTS")));
+        assert!(exp
+            .reasons
+            .iter()
+            .any(|r| r.contains("both vector and FTS")));
     }
 
     #[test]
@@ -499,6 +513,9 @@ mod tests {
             explanation: None,
         };
         let json = serde_json::to_value(&hit).unwrap();
-        assert!(json.get("explanation").is_none(), "explanation should be absent");
+        assert!(
+            json.get("explanation").is_none(),
+            "explanation should be absent"
+        );
     }
 }

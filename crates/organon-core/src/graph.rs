@@ -332,8 +332,10 @@ impl Graph {
         )?;
 
         // ── drop stale FTS entry (indexer re-adds under new path) ─────────────
-        self.conn
-            .execute("DELETE FROM entities_fts WHERE path = ?1", params![old_path])?;
+        self.conn.execute(
+            "DELETE FROM entities_fts WHERE path = ?1",
+            params![old_path],
+        )?;
 
         info!("renamed entity: {} → {}", old_path, new_path);
 
