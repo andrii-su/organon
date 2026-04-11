@@ -35,11 +35,43 @@ pub enum SearchMode {
     Hybrid,
 }
 
+/// Explanation block attached to a search hit when `explain=true`.
+/// All fields are real signals from the ranking pipeline.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+pub struct SearchExplanation {
+    /// Raw vector similarity (0–1) before weight is applied
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vector_score: Option<f64>,
+    /// vector_score × weight (0.7 hybrid, 1.0 vector-only)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vector_contribution: Option<f64>,
+    /// Raw BM25 rank from SQLite FTS5 (negative; lower = more relevant)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fts_rank: Option<f64>,
+    /// Normalized FTS score: 1 / (1 + |rank|), range 0–1
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fts_score: Option<f64>,
+    /// fts_score × weight (0.3 hybrid, 1.0 fts-only)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fts_contribution: Option<f64>,
+    /// Query terms (lowercase) found verbatim in the file path
+    pub matched_terms: Vec<String>,
+    /// True when at least one query term appears in the file path
+    pub path_match: bool,
+    /// Content snippet stored in the vector index
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text_preview: Option<String>,
+    /// 2–5 human-readable reason lines
+    pub reasons: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct SearchHit {
     pub path: String,
     pub score: f64,
     pub source: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub explanation: Option<SearchExplanation>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -166,6 +198,9 @@ pub struct SearchFilesRequest {
     pub extension: Option<String>,
     pub created_after: Option<String>,
     pub modified_after: Option<String>,
+    /// When true, each hit includes an explanation block with score breakdown,
+    /// matched terms, and human-readable ranking reasons.
+    pub explain: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -306,8 +341,9 @@ impl McpService {
         path_prefix: Option<&str>,
         mode: SearchMode,
         metadata_filter: &FindFilter,
+        explain: bool,
     ) -> Result<Vec<SearchHit>> {
-        let mut merged: BTreeMap<String, (f64, bool, bool)> = BTreeMap::new();
+        let mut merged: BTreeMap<String, MergeEntry> = BTreeMap::new();
         let candidate_limit = if metadata_filter_requested(metadata_filter) {
             limit.saturating_mul(12).max(12)
         } else {
@@ -316,14 +352,33 @@ impl McpService {
 
         if matches!(mode, SearchMode::Vector | SearchMode::Hybrid) {
             let results = self.vector_search(query, candidate_limit, path_prefix)?;
+            let weight = if matches!(mode, SearchMode::Hybrid) {
+                0.7
+            } else {
+                1.0
+            };
             for row in results {
                 merged
                     .entry(row.path)
                     .and_modify(|entry| {
-                        entry.0 += row.score * 0.7;
-                        entry.1 = true;
+                        entry.combined_score += row.score * weight;
+                        entry.from_vector = true;
+                        if entry.vector_raw_score.is_none() {
+                            entry.vector_raw_score = Some(row.score);
+                        }
+                        if entry.text_preview.is_none() {
+                            entry.text_preview = row.text_preview.clone();
+                        }
                     })
-                    .or_insert((row.score * 0.7, true, false));
+                    .or_insert(MergeEntry {
+                        combined_score: row.score * weight,
+                        from_vector: true,
+                        from_fts: false,
+                        vector_raw_score: Some(row.score),
+                        fts_raw_rank: None,
+                        fts_normalized_score: None,
+                        text_preview: row.text_preview,
+                    });
             }
         }
 
@@ -333,25 +388,37 @@ impl McpService {
             if let Some(prefix) = path_prefix {
                 results.retain(|(path, _)| path.starts_with(prefix));
             }
+            let weight = if matches!(mode, SearchMode::Hybrid) {
+                0.3
+            } else {
+                1.0
+            };
             for (path, rank) in results {
-                let score = 1.0 / (1.0 + rank.max(0.0));
-                let weight = if matches!(mode, SearchMode::Hybrid) {
-                    0.3
-                } else {
-                    1.0
-                };
+                let normalized = 1.0 / (1.0 + rank.max(0.0));
                 merged
                     .entry(path)
                     .and_modify(|entry| {
-                        entry.0 += score * weight;
-                        entry.2 = true;
+                        entry.combined_score += normalized * weight;
+                        entry.from_fts = true;
+                        if entry.fts_raw_rank.is_none() {
+                            entry.fts_raw_rank = Some(rank);
+                            entry.fts_normalized_score = Some(normalized);
+                        }
                     })
-                    .or_insert((score * weight, false, true));
+                    .or_insert(MergeEntry {
+                        combined_score: normalized * weight,
+                        from_vector: false,
+                        from_fts: true,
+                        vector_raw_score: None,
+                        fts_raw_rank: Some(rank),
+                        fts_normalized_score: Some(normalized),
+                        text_preview: None,
+                    });
             }
         }
 
         let mut rows: Vec<_> = merged.into_iter().collect();
-        rows.sort_by(|a, b| b.1 .0.total_cmp(&a.1 .0));
+        rows.sort_by(|a, b| b.1.combined_score.total_cmp(&a.1.combined_score));
         if metadata_filter_requested(metadata_filter) {
             let graph = self.open_graph()?;
             rows = apply_metadata_filter(rows, &graph, metadata_filter)?;
@@ -360,15 +427,24 @@ impl McpService {
 
         Ok(rows
             .into_iter()
-            .map(|(path, (score, from_vector, from_fts))| SearchHit {
-                path,
-                score,
-                source: match (from_vector, from_fts) {
+            .map(|(path, entry)| {
+                let source = match (entry.from_vector, entry.from_fts) {
                     (true, true) => "hybrid".to_string(),
                     (true, false) => "vector".to_string(),
                     (false, true) => "fts".to_string(),
                     (false, false) => "-".to_string(),
-                },
+                };
+                let explanation = if explain {
+                    Some(build_explanation(query, &path, &entry, mode))
+                } else {
+                    None
+                };
+                SearchHit {
+                    score: entry.combined_score,
+                    path,
+                    source,
+                    explanation,
+                }
             })
             .collect())
     }
@@ -453,7 +529,7 @@ impl McpService {
         query: &str,
         limit: usize,
         path_prefix: Option<&str>,
-    ) -> Result<Vec<SearchHit>> {
+    ) -> Result<Vec<VectorRow>> {
         let output = self.python_run(&[
             "-c",
             &format!(
@@ -544,12 +620,13 @@ impl OrganonMcpServer {
         }
     }
 
-    #[tool(description = "Search files by semantic meaning. Returns structured results.")]
+    #[tool(description = "Search files by semantic meaning. Returns structured results. Pass explain=true for per-hit score breakdown.")]
     async fn search_files(
         &self,
         Parameters(req): Parameters<SearchFilesRequest>,
     ) -> Result<Json<SearchFilesResponse>, String> {
         let mode = req.mode.unwrap_or(SearchMode::Vector);
+        let explain = req.explain.unwrap_or(false);
         let metadata_filter = build_find_filter(
             req.state,
             req.extension,
@@ -565,6 +642,7 @@ impl OrganonMcpServer {
                 req.path_prefix.as_deref(),
                 mode,
                 &metadata_filter,
+                explain,
             )
             .map(|items| Json(SearchFilesResponse { items }))
             .map_err(|e| e.to_string())
@@ -736,6 +814,26 @@ fn to_mcp_error(err: anyhow::Error) -> McpError {
     )
 }
 
+/// Raw row returned by the Python vector search function.
+#[derive(Debug, Deserialize)]
+struct VectorRow {
+    path: String,
+    score: f64,
+    text_preview: Option<String>,
+}
+
+/// Internal per-path accumulator used during search merge phase.
+#[derive(Default)]
+struct MergeEntry {
+    combined_score: f64,
+    from_vector: bool,
+    from_fts: bool,
+    vector_raw_score: Option<f64>,
+    fts_raw_rank: Option<f64>,
+    fts_normalized_score: Option<f64>,
+    text_preview: Option<String>,
+}
+
 fn metadata_filter_requested(filter: &FindFilter) -> bool {
     filter.state.is_some()
         || filter.extension.is_some()
@@ -745,19 +843,80 @@ fn metadata_filter_requested(filter: &FindFilter) -> bool {
 }
 
 fn apply_metadata_filter(
-    rows: Vec<(String, (f64, bool, bool))>,
+    rows: Vec<(String, MergeEntry)>,
     graph: &Graph,
     filter: &FindFilter,
-) -> Result<Vec<(String, (f64, bool, bool))>> {
+) -> Result<Vec<(String, MergeEntry)>> {
     let mut filtered = Vec::with_capacity(rows.len());
-    for (path, meta) in rows {
+    for (path, entry) in rows {
         if let Some(entity) = graph.get_by_path(&path)? {
             if entity_matches_filter(&entity, filter) {
-                filtered.push((path, meta));
+                filtered.push((path, entry));
             }
         }
     }
     Ok(filtered)
+}
+
+/// Build a `SearchExplanation` from raw pipeline signals.
+/// Only real signals are reported — no fabricated rationale.
+fn build_explanation(
+    query: &str,
+    path: &str,
+    entry: &MergeEntry,
+    mode: SearchMode,
+) -> SearchExplanation {
+    let query_terms: Vec<String> = query
+        .split_whitespace()
+        .map(|t| t.to_lowercase())
+        .filter(|t| !t.is_empty())
+        .collect();
+
+    let path_lower = path.to_lowercase();
+    let matched_terms: Vec<String> = query_terms
+        .iter()
+        .filter(|t| path_lower.contains(t.as_str()))
+        .cloned()
+        .collect();
+    let path_match = !matched_terms.is_empty();
+
+    let mut reasons: Vec<String> = Vec::new();
+
+    match (entry.from_vector, entry.from_fts) {
+        (true, true) => reasons.push("matched in both vector and FTS channels".to_string()),
+        (true, false) => reasons.push("matched via semantic vector search".to_string()),
+        (false, true) => reasons.push("matched via full-text search (FTS)".to_string()),
+        _ => {}
+    }
+
+    if path_match {
+        reasons.push(format!("path contains query term(s): {}", matched_terms.join(", ")));
+    }
+
+    if let Some(vs) = entry.vector_raw_score {
+        let label = if vs >= 0.8 { "high" } else if vs >= 0.6 { "moderate" } else { "low" };
+        reasons.push(format!("{label} semantic similarity ({vs:.3})"));
+    }
+
+    if let Some(fs) = entry.fts_normalized_score {
+        let label = if fs >= 0.5 { "strong" } else { "weak" };
+        reasons.push(format!("{label} FTS match (score {fs:.3})"));
+    }
+
+    let vector_weight = if matches!(mode, SearchMode::Hybrid) { 0.7 } else { 1.0 };
+    let fts_weight = if matches!(mode, SearchMode::Hybrid) { 0.3 } else { 1.0 };
+
+    SearchExplanation {
+        vector_score: entry.vector_raw_score,
+        vector_contribution: entry.vector_raw_score.map(|s| s * vector_weight),
+        fts_rank: entry.fts_raw_rank,
+        fts_score: entry.fts_normalized_score,
+        fts_contribution: entry.fts_normalized_score.map(|s| s * fts_weight),
+        matched_terms,
+        path_match,
+        text_preview: entry.text_preview.clone(),
+        reasons,
+    }
 }
 
 fn build_find_filter(
@@ -898,9 +1057,46 @@ mod tests {
                 None,
                 SearchMode::Fts,
                 &FindFilter::default(),
+                false,
             )
             .unwrap();
         assert_eq!(hits[0].path, "/tmp/graph.rs");
+        assert!(hits[0].explanation.is_none(), "explain=false should not attach explanation");
+    }
+
+    #[test]
+    fn search_files_fts_explain_returns_explanation() {
+        let (svc, graph, _file) = temp_service();
+        graph.upsert(&test_entity("/tmp/graph.rs")).unwrap();
+        graph.upsert(&test_entity("/tmp/notes.rs")).unwrap();
+        graph
+            .update_fts("/tmp/graph.rs", "graph.rs", "entity graph sqlite search")
+            .unwrap();
+        graph
+            .update_fts("/tmp/notes.rs", "notes.rs", "gardening shopping list")
+            .unwrap();
+
+        let hits = svc
+            .search_files(
+                "graph sqlite",
+                5,
+                None,
+                SearchMode::Fts,
+                &FindFilter::default(),
+                true,
+            )
+            .unwrap();
+        assert_eq!(hits[0].path, "/tmp/graph.rs");
+        let exp = hits[0].explanation.as_ref().expect("explanation present when explain=true");
+        assert!(exp.fts_score.is_some(), "FTS hit should have fts_score");
+        assert!(exp.vector_score.is_none(), "FTS-only hit should not have vector_score");
+        assert!(!exp.reasons.is_empty(), "reasons should be non-empty");
+        assert!(
+            exp.reasons.iter().any(|r| r.contains("full-text search")),
+            "reasons should mention FTS"
+        );
+        // "graph" appears in the path "/tmp/graph.rs"
+        assert!(exp.path_match, "query term 'graph' should match path");
     }
 
     #[test]
