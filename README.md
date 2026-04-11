@@ -1,30 +1,98 @@
 # Organon
 
-> *"The instrument of thought"* — Aristotle
+[![CI](https://github.com/andrii-su/organon/actions/workflows/ci.yml/badge.svg)](https://github.com/andrii-su/organon/actions/workflows/ci.yml)
+[![Docs](https://github.com/andrii-su/organon/actions/workflows/pages.yml/badge.svg)](https://github.com/andrii-su/organon/actions/workflows/pages.yml)
+[![Rust](https://img.shields.io/badge/core-Rust-1a1320?logo=rust&logoColor=white)](./crates/)
+[![Python](https://img.shields.io/badge/ai-Python%203.12%2B-6d28d9?logo=python&logoColor=white)](./ai/)
+[![License: MIT](https://img.shields.io/github/license/andrii-su/organon)](./LICENSE)
+
+![Organon banner](docs/assets/organon-banner.svg)
 
 **Organon** is a local-first semantic layer over your filesystem. Every file becomes a living entity — with identity, context, relationships, and a lifecycle. Built for humans and AI agents alike.
 
-```
-Your Filesystem
-      ↓
- [ Organon Core ]
-  • Entity graph      — what each file is, why it exists, what it relates to
-  • Lifecycle engine  — born → active → dormant → archived → dead
-  • Semantic search   — find files by meaning, not just name
-      ↓                    ↓
- MCP Server           Menu bar app (coming)
- AI agents query      Humans see the living graph
- your file graph
-```
-
-## Why
+## 🧠 Why Organon
 
 Files are not static blobs. They're created with intent, evolve over time, relate to other files, and eventually become irrelevant. No existing tool treats them this way.
 
-- **For you:** your filesystem organizes itself. Files move, archive, and surface based on context — not manual rules.
-- **For your agents:** Claude, Cursor, Nova — they see a semantic graph of your world, not raw bytes.
+- ✅ **Entity graph** — each file gets a stable identity, purpose, tags, and a relationship graph
+- ✅ **Lifecycle engine** — `born → active → dormant → archived → dead`, driven by real events
+- ✅ **Semantic search** — find files by meaning, not just name; vector + FTS + hybrid modes
+- ✅ **MCP server** — Claude, Cursor, and any MCP-compatible agent can query your file graph
+- ✅ **100% local** — SQLite + LanceDB, nothing leaves your machine
 
-## Architecture
+## 🌐 Docs
+
+- Live: [andrii-su.github.io/organon](https://andrii-su.github.io/organon/)
+- Source: [`docs/`](docs/)
+
+## 🚀 Quick Start
+
+### 1. Bootstrap
+
+```bash
+bash setup.sh
+```
+
+Requires Rust (stable), Python 3.12+, and `uv`.
+
+### 2. Watch a directory
+
+```bash
+organon watch .
+```
+
+### 3. Search semantically
+
+```bash
+organon search "authentication logic" --mode hybrid
+organon search "database schema" --state active --ext rs
+```
+
+### 4. Explore relationships
+
+```bash
+organon graph src/main.rs --depth 2 --format mermaid
+```
+
+## 🔄 Lifecycle
+
+Every entity moves through a deterministic state machine:
+
+```
+born → active → dormant → archived → dead
+```
+
+Transitions are driven by filesystem events, git activity, access patterns, and explicit commands. Organon surfaces what matters now and archives what doesn't.
+
+## 🖥️ CLI Reference
+
+```bash
+# Watch roots for filesystem changes
+organon watch .
+
+# Metadata filters
+organon find --state active --ext rs
+organon find --modified-after 2026-01-01 --larger-than-mb 10
+
+# Search: vector · FTS · hybrid
+organon search "watcher" --state active --mode hybrid
+organon search "sqlite graph" --modified-after 2026-01-01
+
+# Graph output — text, DOT, Mermaid
+organon graph path/to/file.rs --depth 2 --format text
+organon graph path/to/file.rs --format dot
+organon graph path/to/file.rs --format mermaid
+
+# Diff filesystem vs DB, export, summarize
+organon diff .
+organon export --format json
+organon export --format csv --output entities.csv
+organon summarize path/to/file.rs --model llama3.2
+```
+
+Global flags: `--quiet` · `-v` (info) · `-vv` (debug)
+
+## 🏗️ Architecture
 
 ```
 crates/
@@ -37,29 +105,32 @@ ai/
   mcp_server/     Python: MCP tools (search, query, relate)
 ```
 
-## Stack
+## 📦 Stack
 
 | Layer | Technology |
-|-------|-----------|
-| Core daemon | Rust (`notify`, `tokio`, `rusqlite`, `tantivy`) |
-| Semantic vectors | Python (`fastembed`, `lancedb`) |
-| Local LLM | `ollama` |
+| ----- | ---------- |
+| Core daemon | Rust — `notify` · `tokio` · `rusqlite` · `tantivy` |
+| Semantic vectors | Python — `fastembed` · `lancedb` |
+| Content extraction | Python — text · PDF · code · images |
+| Local LLM | `ollama` — summaries via any local model |
 | Agent protocol | MCP (Model Context Protocol) |
-| Storage | SQLite + LanceDB — 100% local |
-| Future UI | Tauri |
+| Storage | SQLite + LanceDB — 100% on-disk |
+| Future UI | Tauri — macOS menu bar app |
 
-## Principles
+## 🧪 Development
 
-- **Local-first.** Nothing leaves your machine without explicit permission.
-- **Open.** MIT license. No telemetry. No accounts.
-- **Agent-native.** MCP server from day one.
-- **Lifecycle-aware.** Files are organisms, not static objects.
+```bash
+# Rust tests
+cargo test --workspace --all-targets
 
-## Status
+# Python linting
+uv run --group dev ruff check ai
 
-🌱 Early development — building the core entity graph.
+# Python tests
+uv run --group dev pytest
+```
 
-## Roadmap
+## 🛣️ Roadmap
 
 - [ ] `organon-core`: filesystem watcher + SQLite entity graph
 - [ ] `organon-core`: lifecycle state machine
@@ -69,6 +140,13 @@ ai/
 - [ ] `organon-cli`: CLI for power users
 - [ ] Dogfood: integrate with OpenClaw/Nova
 - [ ] macOS menu bar app (Tauri)
+
+## 🔒 Principles
+
+- **Local-first.** Nothing leaves your machine without explicit permission.
+- **Open.** MIT license. No telemetry. No accounts.
+- **Agent-native.** MCP server from day one.
+- **Lifecycle-aware.** Files are organisms, not static objects.
 
 ## License
 

@@ -5,3 +5,9 @@ __pycache__/
 *.db
 ~/.organon/
 .DS_Store
+
+artifacts/
+logs/
+.vscode/
+.idea/
+*.log
