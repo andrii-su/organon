@@ -4,7 +4,7 @@
 
 **Organon** is a local-first semantic layer over your filesystem. Every file becomes a living entity — with identity, context, relationships, and a lifecycle. Built for humans and AI agents alike.
 
-```
+```text
 Your Filesystem
       ↓
  [ Organon Core ]
@@ -26,7 +26,7 @@ Files are not static blobs. They're created with intent, evolve over time, relat
 
 ## Architecture
 
-```
+```text
 crates/
   organon-core/   Rust: filesystem watcher, entity graph (SQLite), lifecycle engine
   organon-mcp/    Rust: MCP server exposing the graph to AI agents
@@ -40,7 +40,7 @@ ai/
 ## Stack
 
 | Layer | Technology |
-|-------|-----------|
+| ----- | ---------- |
 | Core daemon | Rust (`notify`, `tokio`, `rusqlite`, `tantivy`) |
 | Semantic vectors | Python (`fastembed`, `lancedb`) |
 | Local LLM | `ollama` |

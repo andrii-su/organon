@@ -1,0 +1,21 @@
+[package]
+name = "organon-cli"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "organon"
+path = "src/main.rs"
+
+[dependencies]
+organon-core = { path = "../organon-core" }
+anyhow = "1"
+clap = { version = "4", features = ["derive", "env"] }
+serde_json = "1"
+chrono = "0.4"
+env_logger = "0.10"
+log = "0.4"
+clap_complete = "4"
+axum = { version = "0.7", features = ["ws"] }
+tower-http = { version = "0.5", features = ["cors"] }
+tokio = { version = "1", features = ["full"] }

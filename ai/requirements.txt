@@ -1,5 +1,0 @@
-fastembed>=0.3
-lancedb>=0.6
-pypdf>=4.0
-mcp>=1.0
-ollama>=0.2
