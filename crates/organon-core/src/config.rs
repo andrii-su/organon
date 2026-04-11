@@ -22,7 +22,10 @@ pub struct LifecycleConfig {
 
 impl Default for LifecycleConfig {
     fn default() -> Self {
-        Self { dormant_days: 30, archive_days: 90 }
+        Self {
+            dormant_days: 30,
+            archive_days: 90,
+        }
     }
 }
 
@@ -42,10 +45,10 @@ pub struct WatchConfig {
 impl Default for WatchConfig {
     fn default() -> Self {
         Self {
-            roots:               vec![],
+            roots: vec![],
             index_interval_secs: 30,
-            ignore_segments:     vec![],
-            use_git_timestamps:  false,
+            ignore_segments: vec![],
+            use_git_timestamps: false,
         }
     }
 }
@@ -55,14 +58,14 @@ impl Default for WatchConfig {
 pub struct SearchConfig {
     pub default_limit: usize,
     /// "vector" | "fts" | "hybrid"
-    pub default_mode:  String,
+    pub default_mode: String,
 }
 
 impl Default for SearchConfig {
     fn default() -> Self {
         Self {
             default_limit: 10,
-            default_mode:  "vector".to_string(),
+            default_mode: "vector".to_string(),
         }
     }
 }
@@ -70,23 +73,23 @@ impl Default for SearchConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct IndexerConfig {
-    pub db_path:      String,
+    pub db_path: String,
     pub vectors_path: String,
-    pub embed_model:  String,
+    pub embed_model: String,
     pub max_file_size_mb: u64,
     /// If true, summarize each file with ollama after embedding
-    pub summarize:    bool,
+    pub summarize: bool,
 }
 
 impl Default for IndexerConfig {
     fn default() -> Self {
         let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
         Self {
-            db_path:          format!("{}/.organon/entities.db", home),
-            vectors_path:     format!("{}/.organon/vectors", home),
-            embed_model:      "BAAI/bge-small-en-v1.5".to_string(),
+            db_path: format!("{}/.organon/entities.db", home),
+            vectors_path: format!("{}/.organon/vectors", home),
+            embed_model: "BAAI/bge-small-en-v1.5".to_string(),
             max_file_size_mb: 100,
-            summarize:        false,
+            summarize: false,
         }
     }
 }
@@ -99,7 +102,9 @@ pub struct OllamaConfig {
 
 impl Default for OllamaConfig {
     fn default() -> Self {
-        Self { model: "llama3.2".to_string() }
+        Self {
+            model: "llama3.2".to_string(),
+        }
     }
 }
 
@@ -112,7 +117,10 @@ pub struct ServerConfig {
 
 impl Default for ServerConfig {
     fn default() -> Self {
-        Self { host: "127.0.0.1".to_string(), port: 7474 }
+        Self {
+            host: "127.0.0.1".to_string(),
+            port: 7474,
+        }
     }
 }
 
@@ -122,11 +130,11 @@ impl Default for ServerConfig {
 #[serde(default)]
 pub struct OrgConfig {
     pub lifecycle: LifecycleConfig,
-    pub watch:     WatchConfig,
-    pub search:    SearchConfig,
-    pub indexer:   IndexerConfig,
-    pub ollama:    OllamaConfig,
-    pub server:    ServerConfig,
+    pub watch: WatchConfig,
+    pub search: SearchConfig,
+    pub indexer: IndexerConfig,
+    pub ollama: OllamaConfig,
+    pub server: ServerConfig,
 }
 
 impl OrgConfig {

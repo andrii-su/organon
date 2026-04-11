@@ -21,7 +21,10 @@ pub fn python_bin() -> PathBuf {
             if let Some(d) = dir {
                 let candidate = d.join(".venv/bin/python");
                 if candidate.exists() {
-                    debug!("python: using .venv from binary dir: {}", candidate.display());
+                    debug!(
+                        "python: using .venv from binary dir: {}",
+                        candidate.display()
+                    );
                     return candidate;
                 }
                 dir = d.parent().map(|p| p.to_path_buf());
@@ -42,10 +45,14 @@ pub fn python_bin() -> PathBuf {
     PathBuf::from("python3")
 }
 
-/// Run a Python command, capture stdout. Returns trimmed output or error.
-pub fn python_run(args: &[&str]) -> Result<String> {
+pub fn python_run_with_env(args: &[&str], envs: &[(String, String)]) -> Result<String> {
     debug!("python_run: {:?}", args);
-    let out = Command::new(python_bin()).args(args).output()?;
+    let mut cmd = Command::new(python_bin());
+    cmd.args(args);
+    for (key, value) in envs {
+        cmd.env(key, value);
+    }
+    let out = cmd.output()?;
     if !out.status.success() {
         bail!(
             "python error (exit {}):\n{}",
@@ -56,10 +63,14 @@ pub fn python_run(args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
-/// Run a Python command, inherit stdio (for interactive processes like MCP server).
-pub fn python_exec(args: &[&str]) -> Result<()> {
+pub fn python_exec_with_env(args: &[&str], envs: &[(String, String)]) -> Result<()> {
     debug!("python_exec: {:?}", args);
-    let status = Command::new(python_bin()).args(args).status()?;
+    let mut cmd = Command::new(python_bin());
+    cmd.args(args);
+    for (key, value) in envs {
+        cmd.env(key, value);
+    }
+    let status = cmd.status()?;
     if !status.success() {
         bail!("python process exited with: {}", status);
     }

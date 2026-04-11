@@ -1,6 +1,6 @@
 use anyhow::Result;
 use log::{debug, info, warn};
-use rusqlite::{Connection, params};
+use rusqlite::{params, params_from_iter, types::Value, Connection};
 
 use crate::entity::{Entity, LifecycleState};
 
@@ -11,11 +11,13 @@ pub struct Graph {
 /// Filter for `Graph::find()`.
 #[derive(Debug, Default)]
 pub struct FindFilter {
-    pub state:          Option<String>,
-    pub extension:      Option<String>,
-    pub modified_after: Option<i64>,   // unix timestamp
-    pub larger_than:    Option<u64>,   // bytes
-    pub limit:          usize,
+    pub state: Option<String>,
+    pub extension: Option<String>,
+    pub created_after: Option<i64>,  // unix timestamp
+    pub modified_after: Option<i64>, // unix timestamp
+    pub larger_than: Option<u64>,    // bytes
+    pub offset: usize,
+    pub limit: usize,
 }
 
 impl Graph {
@@ -29,7 +31,8 @@ impl Graph {
 
     fn migrate(&self) -> Result<()> {
         info!("running schema migration");
-        self.conn.execute_batch("
+        self.conn.execute_batch(
+            "
             CREATE TABLE IF NOT EXISTS entities (
                 id           TEXT PRIMARY KEY,
                 path         TEXT NOT NULL UNIQUE,
@@ -41,7 +44,8 @@ impl Graph {
                 accessed_at  INTEGER NOT NULL,
                 lifecycle    TEXT NOT NULL DEFAULT 'born',
                 content_hash TEXT,
-                summary      TEXT
+                summary      TEXT,
+                git_author   TEXT
             );
             CREATE INDEX IF NOT EXISTS idx_entities_path      ON entities(path);
             CREATE INDEX IF NOT EXISTS idx_entities_lifecycle ON entities(lifecycle);
@@ -60,11 +64,11 @@ impl Graph {
             CREATE VIRTUAL TABLE IF NOT EXISTS entities_fts USING fts5(
                 path UNINDEXED,
                 name,
-                content,
-                content='entities',
-                content_rowid='rowid'
+                content
             );
-        ")?;
+        ",
+        )?;
+        ensure_column(&self.conn, "entities", "git_author", "TEXT")?;
         debug!("schema migration ok");
         Ok(())
     }
@@ -76,8 +80,8 @@ impl Graph {
         self.conn.execute(
             "INSERT INTO entities
                 (id, path, name, extension, size_bytes, created_at, modified_at, accessed_at,
-                 lifecycle, content_hash, summary)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)
+                 lifecycle, content_hash, summary, git_author)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)
              ON CONFLICT(path) DO UPDATE SET
                 name         = excluded.name,
                 extension    = excluded.extension,
@@ -85,12 +89,21 @@ impl Graph {
                 modified_at  = excluded.modified_at,
                 accessed_at  = excluded.accessed_at,
                 lifecycle    = excluded.lifecycle,
-                content_hash = excluded.content_hash",
+                content_hash = excluded.content_hash,
+                git_author   = excluded.git_author",
             params![
-                entity.id, entity.path, entity.name, entity.extension,
-                entity.size_bytes as i64, entity.created_at, entity.modified_at,
-                entity.accessed_at, entity.lifecycle.as_str(),
-                entity.content_hash, entity.summary,
+                entity.id,
+                entity.path,
+                entity.name,
+                entity.extension,
+                entity.size_bytes as i64,
+                entity.created_at,
+                entity.modified_at,
+                entity.accessed_at,
+                entity.lifecycle.as_str(),
+                entity.content_hash,
+                entity.summary,
+                entity.git_author,
             ],
         )?;
         Ok(())
@@ -100,7 +113,7 @@ impl Graph {
         debug!("get_by_path: {}", path);
         let mut stmt = self.conn.prepare(
             "SELECT id, path, name, extension, size_bytes, created_at, modified_at,
-                    accessed_at, lifecycle, content_hash, summary
+                    accessed_at, lifecycle, content_hash, summary, git_author
              FROM entities WHERE path = ?1",
         )?;
         let mut rows = stmt.query(params![path])?;
@@ -113,16 +126,25 @@ impl Graph {
     }
 
     pub fn delete_by_path(&self, path: &str) -> Result<()> {
-        let n = self.conn.execute("DELETE FROM entities WHERE path = ?1", params![path])?;
-        if n > 0 { info!("deleted entity: {}", path); }
-        else { warn!("delete_by_path: no entity at {}", path); }
+        self.conn.execute(
+            "DELETE FROM relationships WHERE from_path = ?1 OR to_path = ?1",
+            params![path],
+        )?;
+        let n = self
+            .conn
+            .execute("DELETE FROM entities WHERE path = ?1", params![path])?;
+        if n > 0 {
+            info!("deleted entity: {}", path);
+        } else {
+            warn!("delete_by_path: no entity at {}", path);
+        }
         Ok(())
     }
 
     pub fn all(&self) -> Result<Vec<Entity>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, path, name, extension, size_bytes, created_at, modified_at,
-                    accessed_at, lifecycle, content_hash, summary FROM entities",
+                    accessed_at, lifecycle, content_hash, summary, git_author FROM entities",
         )?;
         let rows = stmt.query_map([], |row| row_to_entity(row))?;
         let entities: rusqlite::Result<Vec<_>> = rows.collect();
@@ -133,38 +155,55 @@ impl Graph {
 
     /// Filtered query — for `organon find`.
     pub fn find(&self, filter: &FindFilter) -> Result<Vec<Entity>> {
-        let mut where_parts: Vec<String> = vec!["1=1".into()];
-        if let Some(s) = &filter.state          { where_parts.push(format!("lifecycle = '{}'", s.replace('\'', ""))); }
-        if let Some(e) = &filter.extension      { where_parts.push(format!("extension = '{}'", e.replace('\'', ""))); }
-        if let Some(t) = filter.modified_after  { where_parts.push(format!("modified_at > {}", t)); }
-        if let Some(b) = filter.larger_than     { where_parts.push(format!("size_bytes > {}", b)); }
-
+        let (where_parts, mut params) = build_find_where(filter);
         let limit = if filter.limit == 0 { 50 } else { filter.limit };
+        let offset = filter.offset as i64;
+        params.push(Value::Integer(limit as i64));
+        params.push(Value::Integer(offset));
+
         let sql = format!(
             "SELECT id, path, name, extension, size_bytes, created_at, modified_at,
-                    accessed_at, lifecycle, content_hash, summary
-             FROM entities WHERE {} ORDER BY modified_at DESC LIMIT {}",
-            where_parts.join(" AND "), limit
+                    accessed_at, lifecycle, content_hash, summary, git_author
+             FROM entities WHERE {} ORDER BY modified_at DESC LIMIT ? OFFSET ?",
+            where_parts.join(" AND ")
         );
         debug!("find: {}", sql);
         let mut stmt = self.conn.prepare(&sql)?;
-        let rows = stmt.query_map([], |row| row_to_entity(row))?;
+        let rows = stmt.query_map(params_from_iter(params.iter()), |row| row_to_entity(row))?;
         let entities: rusqlite::Result<Vec<_>> = rows.collect();
         Ok(entities?)
     }
 
+    pub fn count_find(&self, filter: &FindFilter) -> Result<usize> {
+        let (where_parts, params) = build_find_where(filter);
+        let sql = format!(
+            "SELECT COUNT(*) FROM entities WHERE {}",
+            where_parts.join(" AND ")
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let total: i64 = stmt.query_row(params_from_iter(params.iter()), |row| row.get(0))?;
+        Ok(total as usize)
+    }
+
     /// Delete all dead entities. Returns count removed.
     pub fn delete_dead_entities(&self) -> Result<usize> {
-        let n = self.conn.execute("DELETE FROM entities WHERE lifecycle = 'dead'", [])?;
-        info!("cleaned {} dead entities", n);
-        Ok(n)
+        let paths: Vec<String> = self
+            .dead_entities()?
+            .into_iter()
+            .map(|entity| entity.path)
+            .collect();
+        for path in &paths {
+            self.delete_by_path(path)?;
+        }
+        info!("cleaned {} dead entities", paths.len());
+        Ok(paths.len())
     }
 
     /// List dead entities (for --dry-run preview).
     pub fn dead_entities(&self) -> Result<Vec<Entity>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, path, name, extension, size_bytes, created_at, modified_at,
-                    accessed_at, lifecycle, content_hash, summary
+                    accessed_at, lifecycle, content_hash, summary, git_author
              FROM entities WHERE lifecycle = 'dead'",
         )?;
         let rows = stmt.query_map([], |row| row_to_entity(row))?;
@@ -212,18 +251,26 @@ impl Graph {
              WHERE from_path = ?1 OR to_path = ?1",
         )?;
         let rows = stmt.query_map(params![path], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?))
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
         })?;
         let rels: rusqlite::Result<Vec<_>> = rows.collect();
         Ok(rels?)
     }
 
     pub fn all_relations(&self) -> Result<Vec<(String, String, String)>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT from_path, to_path, kind FROM relationships",
-        )?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT from_path, to_path, kind FROM relationships")?;
         let rows = stmt.query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?))
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
         })?;
         let rels: rusqlite::Result<Vec<_>> = rows.collect();
         Ok(rels?)
@@ -232,9 +279,43 @@ impl Graph {
     /// Delete all edges where from_path matches — called before re-extracting relations.
     pub fn delete_relations_from(&self, from_path: &str) -> Result<usize> {
         let n = self.conn.execute(
-            "DELETE FROM relationships WHERE from_path = ?1", params![from_path],
+            "DELETE FROM relationships WHERE from_path = ?1",
+            params![from_path],
         )?;
-        debug!("delete_relations_from: {} edges removed for {}", n, from_path);
+        debug!(
+            "delete_relations_from: {} edges removed for {}",
+            n, from_path
+        );
+        Ok(n)
+    }
+
+    pub fn stale_relations(&self) -> Result<Vec<(String, String, String)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT r.from_path, r.to_path, r.kind
+             FROM relationships r
+             LEFT JOIN entities src ON src.path = r.from_path
+             LEFT JOIN entities dst ON dst.path = r.to_path
+             WHERE src.path IS NULL OR dst.path IS NULL",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?;
+        let rels: rusqlite::Result<Vec<_>> = rows.collect();
+        Ok(rels?)
+    }
+
+    pub fn delete_stale_relations(&self) -> Result<usize> {
+        let n = self.conn.execute(
+            "DELETE FROM relationships
+             WHERE NOT EXISTS (SELECT 1 FROM entities e WHERE e.path = relationships.from_path)
+                OR NOT EXISTS (SELECT 1 FROM entities e WHERE e.path = relationships.to_path)",
+            [],
+        )?;
+        info!("cleaned {} stale relations", n);
         Ok(n)
     }
 
@@ -242,10 +323,10 @@ impl Graph {
 
     /// Update FTS index for a file after text extraction.
     pub fn update_fts(&self, path: &str, name: &str, content: &str) -> Result<()> {
-        // FTS content table — use INSERT OR REPLACE keyed on path
+        self.conn
+            .execute("DELETE FROM entities_fts WHERE path = ?1", params![path])?;
         self.conn.execute(
-            "INSERT INTO entities_fts(path, name, content) VALUES (?1, ?2, ?3)
-             ON CONFLICT DO UPDATE SET name=excluded.name, content=excluded.content",
+            "INSERT INTO entities_fts(path, name, content) VALUES (?1, ?2, ?3)",
             params![path, name, &content[..content.len().min(4000)]],
         )?;
         Ok(())
@@ -253,13 +334,29 @@ impl Graph {
 
     /// Full-text search. Returns (path, rank) pairs sorted by relevance.
     pub fn fts_search(&self, query: &str, limit: usize) -> Result<Vec<(String, f64)>> {
-        let safe_query = query.replace('"', " ");
-        let sql = format!(
-            "SELECT path, rank FROM entities_fts WHERE entities_fts MATCH '\"{}\"' ORDER BY rank LIMIT {}",
-            safe_query, limit
-        );
-        let mut stmt = self.conn.prepare(&sql)?;
-        let rows = stmt.query_map([], |row| {
+        let sanitized = query
+            .chars()
+            .map(|c| {
+                if c.is_alphanumeric() || matches!(c, '_' | '-' | '/' | '.') {
+                    c
+                } else {
+                    ' '
+                }
+            })
+            .collect::<String>();
+        let sanitized = sanitized.split_whitespace().collect::<Vec<_>>().join(" ");
+        if sanitized.is_empty() {
+            return Ok(vec![]);
+        }
+
+        let mut stmt = self.conn.prepare(
+            "SELECT path, bm25(entities_fts) AS score
+             FROM entities_fts
+             WHERE entities_fts MATCH ?1
+             ORDER BY score
+             LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![sanitized, limit as i64], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)?))
         })?;
         let results: rusqlite::Result<Vec<_>> = rows.collect();
@@ -271,30 +368,109 @@ impl Graph {
 
 fn row_to_entity(row: &rusqlite::Row<'_>) -> rusqlite::Result<Entity> {
     Ok(Entity {
-        id:           row.get(0)?,
-        path:         row.get(1)?,
-        name:         row.get(2)?,
-        extension:    row.get(3)?,
-        size_bytes:   row.get::<_, i64>(4)? as u64,
-        created_at:   row.get(5)?,
-        modified_at:  row.get(6)?,
-        accessed_at:  row.get(7)?,
-        lifecycle:    lifecycle_from_str(&row.get::<_, String>(8)?),
+        id: row.get(0)?,
+        path: row.get(1)?,
+        name: row.get(2)?,
+        extension: row.get(3)?,
+        size_bytes: row.get::<_, i64>(4)? as u64,
+        created_at: row.get(5)?,
+        modified_at: row.get(6)?,
+        accessed_at: row.get(7)?,
+        lifecycle: lifecycle_from_str(&row.get::<_, String>(8)?),
         content_hash: row.get(9)?,
-        summary:      row.get(10)?,
+        summary: row.get(10)?,
+        git_author: row.get(11)?,
     })
 }
 
 fn lifecycle_from_str(s: &str) -> LifecycleState {
     match s {
-        "born"     => LifecycleState::Born,
-        "active"   => LifecycleState::Active,
-        "dormant"  => LifecycleState::Dormant,
+        "born" => LifecycleState::Born,
+        "active" => LifecycleState::Active,
+        "dormant" => LifecycleState::Dormant,
         "archived" => LifecycleState::Archived,
-        "dead"     => LifecycleState::Dead,
-        other      => {
+        "dead" => LifecycleState::Dead,
+        other => {
             warn!("unknown lifecycle value '{}', defaulting to Born", other);
             LifecycleState::Born
         }
     }
+}
+
+pub fn entity_matches_filter(entity: &Entity, filter: &FindFilter) -> bool {
+    if filter
+        .state
+        .as_ref()
+        .is_some_and(|state| entity.lifecycle.as_str() != state)
+    {
+        return false;
+    }
+    if filter
+        .extension
+        .as_ref()
+        .is_some_and(|ext| entity.extension.as_deref() != Some(ext.trim_start_matches('.')))
+    {
+        return false;
+    }
+    if filter
+        .created_after
+        .is_some_and(|created_after| entity.created_at <= created_after)
+    {
+        return false;
+    }
+    if filter
+        .modified_after
+        .is_some_and(|modified_after| entity.modified_at <= modified_after)
+    {
+        return false;
+    }
+    if filter
+        .larger_than
+        .is_some_and(|larger_than| entity.size_bytes <= larger_than)
+    {
+        return false;
+    }
+    true
+}
+
+fn build_find_where(filter: &FindFilter) -> (Vec<String>, Vec<Value>) {
+    let mut where_parts: Vec<String> = vec!["1=1".into()];
+    let mut params: Vec<Value> = Vec::new();
+
+    if let Some(s) = &filter.state {
+        where_parts.push("lifecycle = ?".into());
+        params.push(Value::Text(s.clone()));
+    }
+    if let Some(e) = &filter.extension {
+        where_parts.push("extension = ?".into());
+        params.push(Value::Text(e.trim_start_matches('.').to_string()));
+    }
+    if let Some(t) = filter.created_after {
+        where_parts.push("created_at > ?".into());
+        params.push(Value::Integer(t));
+    }
+    if let Some(t) = filter.modified_after {
+        where_parts.push("modified_at > ?".into());
+        params.push(Value::Integer(t));
+    }
+    if let Some(b) = filter.larger_than {
+        where_parts.push("size_bytes > ?".into());
+        params.push(Value::Integer(b as i64));
+    }
+
+    (where_parts, params)
+}
+
+fn ensure_column(conn: &Connection, table: &str, column: &str, definition: &str) -> Result<()> {
+    let pragma = format!("PRAGMA table_info({table})");
+    let mut stmt = conn.prepare(&pragma)?;
+    let columns = stmt.query_map([], |row| row.get::<_, String>(1))?;
+    let existing: rusqlite::Result<Vec<_>> = columns.collect();
+    if existing?.iter().any(|name| name == column) {
+        return Ok(());
+    }
+
+    let sql = format!("ALTER TABLE {table} ADD COLUMN {column} {definition}");
+    conn.execute(&sql, [])?;
+    Ok(())
 }

@@ -3,10 +3,10 @@ use std::time::UNIX_EPOCH;
 
 use anyhow::Result;
 use log::{debug, warn};
-use sha2::{Digest, Sha256};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
-use crate::lifecycle::compute_state_default;
+use crate::{git::git_file_metadata, lifecycle::compute_state_default};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Entity {
@@ -21,6 +21,7 @@ pub struct Entity {
     pub lifecycle: LifecycleState,
     pub content_hash: Option<String>,
     pub summary: Option<String>,
+    pub git_author: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -34,6 +35,10 @@ pub enum LifecycleState {
 
 impl Entity {
     pub fn from_path(path: &str) -> Result<Self> {
+        Self::from_path_with_options(path, false)
+    }
+
+    pub fn from_path_with_options(path: &str, use_git_timestamps: bool) -> Result<Self> {
         let canonical = std::fs::canonicalize(path)?;
         let p = canonical.as_path();
         let meta = std::fs::metadata(p)?;
@@ -42,7 +47,8 @@ impl Entity {
             .duration_since(UNIX_EPOCH)?
             .as_secs() as i64;
 
-        let created_at = meta.created()
+        let mut created_at = meta
+            .created()
             .ok()
             .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
             .map(|d| d.as_secs() as i64)
@@ -51,7 +57,8 @@ impl Entity {
                 now
             });
 
-        let modified_at = meta.modified()
+        let mut modified_at = meta
+            .modified()
             .ok()
             .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
             .map(|d| d.as_secs() as i64)
@@ -60,7 +67,8 @@ impl Entity {
                 now
             });
 
-        let accessed_at = meta.accessed()
+        let accessed_at = meta
+            .accessed()
             .ok()
             .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
             .map(|d| d.as_secs() as i64)
@@ -69,12 +77,21 @@ impl Entity {
                 now
             });
 
-        let name = p.file_name()
+        let name = p
+            .file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_default();
 
-        let extension = p.extension()
-            .map(|e| e.to_string_lossy().to_string());
+        let extension = p.extension().map(|e| e.to_string_lossy().to_string());
+
+        let mut git_author = None;
+        if use_git_timestamps {
+            if let Some(metadata) = git_file_metadata(p) {
+                created_at = metadata.created_at;
+                modified_at = metadata.modified_at;
+                git_author = metadata.top_author;
+            }
+        }
 
         let content_hash = match hash_file(p) {
             Ok(h) => Some(h),
@@ -106,6 +123,7 @@ impl Entity {
             lifecycle,
             content_hash,
             summary: None,
+            git_author,
         })
     }
 }
@@ -127,7 +145,9 @@ fn hash_file(path: &Path) -> Result<String> {
     let mut buf = [0u8; 64 * 1024];
     loop {
         let n = reader.read(&mut buf)?;
-        if n == 0 { break; }
+        if n == 0 {
+            break;
+        }
         hasher.update(&buf[..n]);
     }
     Ok(hex::encode(hasher.finalize()))
@@ -136,11 +156,11 @@ fn hash_file(path: &Path) -> Result<String> {
 impl LifecycleState {
     pub fn as_str(&self) -> &str {
         match self {
-            Self::Born     => "born",
-            Self::Active   => "active",
-            Self::Dormant  => "dormant",
+            Self::Born => "born",
+            Self::Active => "active",
+            Self::Dormant => "dormant",
             Self::Archived => "archived",
-            Self::Dead     => "dead",
+            Self::Dead => "dead",
         }
     }
 }

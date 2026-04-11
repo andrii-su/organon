@@ -11,15 +11,26 @@ use log::debug;
 
 /// Built-in path segments that are always ignored.
 pub const BUILT_IN_SEGMENTS: &[&str] = &[
-    ".git", ".hg", ".svn",
-    "node_modules", "target", ".venv", "__pycache__",
-    ".pytest_cache", ".mypy_cache", ".ruff_cache",
-    ".DS_Store", "dist", "build", ".next", ".nuxt",
+    ".git",
+    ".hg",
+    ".svn",
+    "node_modules",
+    "target",
+    ".venv",
+    "__pycache__",
+    ".pytest_cache",
+    ".mypy_cache",
+    ".ruff_cache",
+    ".DS_Store",
+    "dist",
+    "build",
+    ".next",
+    ".nuxt",
 ];
 
 pub struct IgnoreSet {
     extra_segments: Vec<String>,
-    gitignore:      Option<Gitignore>,
+    gitignore: Option<Gitignore>,
 }
 
 impl IgnoreSet {
@@ -40,7 +51,7 @@ impl IgnoreSet {
             return None;
         }
         let mut builder = GitignoreBuilder::new(root);
-        if let Err(e) = builder.add(file.clone()) {
+        if let Some(e) = builder.add(file.clone()) {
             debug!(".organonignore add error: {:?}", e);
             return None;
         }

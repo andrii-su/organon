@@ -10,10 +10,15 @@ pub fn human_bytes(b: u64) -> String {
     const KB: u64 = 1024;
     const MB: u64 = KB * 1024;
     const GB: u64 = MB * 1024;
-    if b >= GB      { format!("{:.1} GB", b as f64 / GB as f64) }
-    else if b >= MB { format!("{:.1} MB", b as f64 / MB as f64) }
-    else if b >= KB { format!("{:.1} KB", b as f64 / KB as f64) }
-    else            { format!("{} B", b) }
+    if b >= GB {
+        format!("{:.1} GB", b as f64 / GB as f64)
+    } else if b >= MB {
+        format!("{:.1} MB", b as f64 / MB as f64)
+    } else if b >= KB {
+        format!("{:.1} KB", b as f64 / KB as f64)
+    } else {
+        format!("{} B", b)
+    }
 }
 
 #[cfg(test)]
@@ -21,13 +26,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn bytes_under_kb() { assert_eq!(human_bytes(512), "512 B"); }
+    fn bytes_under_kb() {
+        assert_eq!(human_bytes(512), "512 B");
+    }
 
     #[test]
-    fn bytes_kb() { assert_eq!(human_bytes(2048), "2.0 KB"); }
+    fn bytes_kb() {
+        assert_eq!(human_bytes(2048), "2.0 KB");
+    }
 
     #[test]
-    fn bytes_mb() { assert_eq!(human_bytes(5 * 1024 * 1024), "5.0 MB"); }
+    fn bytes_mb() {
+        assert_eq!(human_bytes(5 * 1024 * 1024), "5.0 MB");
+    }
 
     #[test]
     fn format_ts_valid() {
