@@ -1,22 +1,141 @@
 """Local vector store using fastembed + lancedb."""
+import logging
+import time
 from pathlib import Path
+from typing import Any
+
+import pyarrow as pa
+
+logger = logging.getLogger(__name__)
+
+DB_PATH = "~/.organon/vectors"
+TABLE_NAME = "entities"
+
+# BAAI/bge-small-en-v1.5 — 384 dims, ~130MB, fast on CPU
+EMBED_MODEL = "BAAI/bge-small-en-v1.5"
+EMBED_DIM = 384
+
+_model = None  # lazy singleton
 
 
-def get_store(db_path: str = "~/.organon/vectors"):
+def _get_model():
+    global _model
+    if _model is None:
+        logger.info("loading embedding model: %s", EMBED_MODEL)
+        from fastembed import TextEmbedding
+        _model = TextEmbedding(model_name=EMBED_MODEL)
+        logger.info("embedding model loaded")
+    return _model
+
+
+def _get_table(db_path: str = DB_PATH):
+    import lancedb
+
+    path = Path(db_path).expanduser()
+    path.mkdir(parents=True, exist_ok=True)
+    db = lancedb.connect(str(path))
+
     try:
-        import lancedb
-        path = Path(db_path).expanduser()
-        path.mkdir(parents=True, exist_ok=True)
-        return lancedb.connect(str(path))
-    except ImportError:
-        raise ImportError("Install lancedb: pip install lancedb")
+        return db.open_table(TABLE_NAME)
+    except Exception:
+        logger.info("creating lancedb table '%s' at %s", TABLE_NAME, path)
+        schema = pa.schema([
+            pa.field("path",         pa.utf8()),
+            pa.field("content_hash", pa.utf8()),
+            pa.field("text_preview", pa.utf8()),
+            pa.field("vector",       pa.list_(pa.float32(), EMBED_DIM)),
+            pa.field("indexed_at",   pa.int64()),
+        ])
+        return db.create_table(TABLE_NAME, schema=schema)
 
 
 def embed_text(text: str) -> list[float]:
+    model = _get_model()
+    embeddings = list(model.embed([text]))
+    return embeddings[0].tolist()
+
+
+def index_file(path: str, text: str, content_hash: str, db_path: str = DB_PATH) -> None:
+    """Embed and store a file. Skips if content_hash already indexed."""
+    table = _get_table(db_path)
+
+    # Skip if already indexed with same hash
     try:
-        from fastembed import TextEmbedding
-        model = TextEmbedding()
-        embeddings = list(model.embed([text]))
-        return embeddings[0].tolist()
-    except ImportError:
-        raise ImportError("Install fastembed: pip install fastembed")
+        existing = table.search().where(
+            f"content_hash = '{content_hash}'"
+        ).limit(1).to_list()
+        if existing:
+            logger.debug("index_file: already indexed [%s]: %s", content_hash[:8], path)
+            return
+    except Exception as e:
+        logger.debug("index_file: hash check failed: %s", e)
+
+    # Remove old entry for this path (hash changed)
+    try:
+        table.delete(f"path = '{path}'")
+        logger.debug("index_file: removed stale entry: %s", path)
+    except Exception as e:
+        logger.debug("index_file: delete failed (ok if new): %s", e)
+
+    vector = embed_text(text)
+    preview = text[:500].replace("\n", " ")
+
+    table.add([{
+        "path":         path,
+        "content_hash": content_hash,
+        "text_preview": preview,
+        "vector":       vector,
+        "indexed_at":   int(time.time()),
+    }])
+    logger.debug("index_file: indexed [%s]: %s", content_hash[:8], path)
+
+
+def search(
+    query: str,
+    limit: int = 10,
+    db_path: str = DB_PATH,
+    path_prefix: str | None = None,
+) -> list[dict[str, Any]]:
+    """Semantic search. Returns list of {path, score, text_preview}.
+
+    Args:
+        query: Natural language query.
+        limit: Max results returned.
+        db_path: Vector store path.
+        path_prefix: If set, only return files whose path starts with this prefix.
+    """
+    logger.debug("search: %r limit=%d prefix=%r", query, limit, path_prefix)
+    table = _get_table(db_path)
+    vector = embed_text(query)
+
+    fetch_limit = limit * 4 if path_prefix else limit
+    results = table.search(vector).limit(fetch_limit).to_list()
+
+    if path_prefix:
+        results = [r for r in results if r["path"].startswith(path_prefix)]
+        logger.debug("search: %d results after prefix filter", len(results))
+
+    results = results[:limit]
+    logger.debug("search: %d results", len(results))
+
+    return [
+        {
+            "path":         r["path"],
+            "score":        float(1 - r.get("_distance", 0)),
+            "text_preview": r["text_preview"],
+        }
+        for r in results
+    ]
+
+
+def get_indexed_hashes(db_path: str = DB_PATH) -> set[str]:
+    """Return all content_hashes currently in the vector store."""
+    try:
+        table = _get_table(db_path)
+        rows = table.search().select(["content_hash"]).limit(100_000).to_list()
+        hashes = {r["content_hash"] for r in rows}
+        logger.debug("get_indexed_hashes: %d hashes", len(hashes))
+        return hashes
+    except Exception as e:
+        logger.warning("get_indexed_hashes failed: %s", e)
+        return set()
