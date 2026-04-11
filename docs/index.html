@@ -1,0 +1,339 @@
+<!doctype html>
+<html lang="en">
+    <head>
+        <meta charset="UTF-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <meta
+            name="description"
+            content="Organon — local-first semantic layer over your filesystem. Every file becomes a living entity with identity, context, relationships, and a lifecycle."
+        />
+        <title>Organon | Local-first semantic filesystem layer</title>
+        <link rel="preconnect" href="https://fonts.googleapis.com" />
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+        <link
+            href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Space+Grotesk:wght@400;500;600;700;800&display=swap"
+            rel="stylesheet"
+        />
+        <link rel="stylesheet" href="./styles.css" />
+    </head>
+    <body>
+        <header class="topbar">
+            <div class="topbar-inner">
+                <a class="brand" href="#top">Organon</a>
+                <nav class="nav-links">
+                    <a href="#features">Features</a>
+                    <a href="#lifecycle">Lifecycle</a>
+                    <a href="#architecture">Architecture</a>
+                    <a href="#cli">CLI</a>
+                    <a href="#stack">Stack</a>
+                    <a href="https://github.com/andrii-su/organon">GitHub</a>
+                </nav>
+            </div>
+        </header>
+
+        <main id="top">
+            <div class="banner-wrap">
+                <img
+                    src="./assets/organon-banner.svg"
+                    alt="Organon — local-first semantic layer over your filesystem"
+                    width="1280"
+                    height="640"
+                />
+            </div>
+
+            <!-- Hero -->
+            <section class="hero">
+                <article class="card hero-copy">
+                    <span class="chip">Local-first · Agent-native</span>
+                    <h1>Your filesystem, finally alive</h1>
+                    <p>
+                        Organon is a semantic layer over your filesystem. Every file
+                        becomes a living entity — with identity, context, relationships,
+                        and a lifecycle. Built for humans and AI agents alike.
+                    </p>
+                    <div class="cta">
+                        <a
+                            class="button primary"
+                            href="https://github.com/andrii-su/organon"
+                            >Open repository</a
+                        >
+                        <a
+                            class="button secondary"
+                            href="#cli"
+                            >Explore CLI</a
+                        >
+                    </div>
+                </article>
+
+                <aside class="card hero-panel">
+                    <div class="metric">
+                        <strong data-target="100" data-suffix="%">0%</strong>
+                        <span>Local — nothing leaves your machine</span>
+                    </div>
+                    <div class="metric">
+                        <strong data-target="5">0</strong>
+                        <span>Lifecycle states per entity</span>
+                    </div>
+                    <div class="metric">
+                        <strong data-target="3">0</strong>
+                        <span>Search modes: vector · FTS · hybrid</span>
+                    </div>
+                    <div class="metric">
+                        <strong data-target="0" data-suffix=" accounts">0</strong>
+                        <span>No accounts, no telemetry, MIT license</span>
+                    </div>
+                </aside>
+            </section>
+
+            <!-- Features -->
+            <section id="features" class="section card">
+                <div class="section-header">
+                    <span class="section-index">01</span>
+                    <h2 class="section-title">Why Organon exists</h2>
+                </div>
+                <div class="section-body">
+                    <p class="section-lead">
+                        Files are not static blobs. They're created with intent, evolve over time,
+                        relate to other files, and eventually become irrelevant. No existing tool
+                        treats them this way.
+                    </p>
+                    <div class="grid features">
+                        <article class="feature">
+                            <div class="feature-label">Entity Graph</div>
+                            <h3>Identity for every file</h3>
+                            <p>
+                                Each file gets a stable identity, purpose description, tags,
+                                and a rich relationship graph — not just a path string.
+                            </p>
+                        </article>
+                        <article class="feature">
+                            <div class="feature-label">Lifecycle Engine</div>
+                            <h3>Files as living organisms</h3>
+                            <p>
+                                Born → Active → Dormant → Archived → Dead.
+                                Organon tracks state transitions and surfaces what matters now.
+                            </p>
+                        </article>
+                        <article class="feature">
+                            <div class="feature-label">Semantic Search</div>
+                            <h3>Find by meaning, not name</h3>
+                            <p>
+                                Vector search via fastembed + LanceDB. Full-text via Tantivy.
+                                Hybrid mode combines both with metadata filters.
+                            </p>
+                        </article>
+                        <article class="feature">
+                            <div class="feature-label">MCP Server</div>
+                            <h3>Agent-native from day one</h3>
+                            <p>
+                                Claude, Cursor, and any MCP-compatible agent can query,
+                                relate, and navigate your file graph directly.
+                            </p>
+                        </article>
+                        <article class="feature">
+                            <div class="feature-label">Watcher</div>
+                            <h3>Always in sync</h3>
+                            <p>
+                                Filesystem events drive entity creation and updates in real
+                                time. No manual indexing, no stale data.
+                            </p>
+                        </article>
+                        <article class="feature">
+                            <div class="feature-label">Portability</div>
+                            <h3>100% local storage</h3>
+                            <p>
+                                SQLite for the entity graph. LanceDB for vectors.
+                                Everything lives on disk — no cloud dependency.
+                            </p>
+                        </article>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Lifecycle -->
+            <section id="lifecycle" class="section card">
+                <div class="section-header">
+                    <span class="section-index">02</span>
+                    <h2 class="section-title">Lifecycle state machine</h2>
+                </div>
+                <div class="section-body">
+                    <p class="section-lead">
+                        Every entity moves through a deterministic state machine. Transitions are
+                        triggered by filesystem events, git activity, access patterns, and explicit
+                        user commands.
+                    </p>
+                </div>
+                <div class="lifecycle">
+                    <div class="lc-stage">
+                        <span class="lc-dot born"></span>
+                        <span class="lc-name">Born</span>
+                        <span class="lc-desc">File detected for the first time</span>
+                    </div>
+                    <div class="lc-stage">
+                        <span class="lc-dot active"></span>
+                        <span class="lc-name">Active</span>
+                        <span class="lc-desc">Recently modified or accessed</span>
+                    </div>
+                    <div class="lc-stage">
+                        <span class="lc-dot dormant"></span>
+                        <span class="lc-name">Dormant</span>
+                        <span class="lc-desc">No activity for a threshold period</span>
+                    </div>
+                    <div class="lc-stage">
+                        <span class="lc-dot archive"></span>
+                        <span class="lc-name">Archived</span>
+                        <span class="lc-desc">Explicitly archived or auto-retired</span>
+                    </div>
+                    <div class="lc-stage">
+                        <span class="lc-dot dead"></span>
+                        <span class="lc-name">Dead</span>
+                        <span class="lc-desc">File deleted from filesystem</span>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Architecture -->
+            <section id="architecture" class="section card">
+                <div class="section-header">
+                    <span class="section-index">03</span>
+                    <h2 class="section-title">Architecture</h2>
+                </div>
+                <div class="section-body">
+                    <p class="section-lead">
+                        A Rust core for speed and correctness, a Python AI layer for embeddings
+                        and extraction, and an MCP server that connects everything to any
+                        compatible AI agent.
+                    </p>
+                </div>
+                <div class="arch-flow">
+                    <div class="arch-step">
+                        <div class="arch-num">Layer 01</div>
+                        <h3>organon-core</h3>
+                        <p>Rust daemon. Filesystem watcher via <code>notify</code>. Entity graph in SQLite. FTS via Tantivy. Lifecycle state machine.</p>
+                    </div>
+                    <div class="arch-step">
+                        <div class="arch-num">Layer 02</div>
+                        <h3>ai/ extractor + embeddings</h3>
+                        <p>Python. Content extraction for text, PDF, code. Local semantic vectors via fastembed + LanceDB. Summaries via Ollama.</p>
+                    </div>
+                    <div class="arch-step">
+                        <div class="arch-num">Layer 03</div>
+                        <h3>organon-mcp + cli</h3>
+                        <p>MCP server exposing search, query, and relate tools to agents. CLI for power users: find, graph, diff, export.</p>
+                    </div>
+                </div>
+            </section>
+
+            <!-- CLI -->
+            <section id="cli" class="section card">
+                <div class="section-header">
+                    <span class="section-index">04</span>
+                    <h2 class="section-title">CLI reference</h2>
+                </div>
+                <div class="section-body">
+                    <p class="section-lead">
+                        The <code>organon</code> binary covers watching, finding, searching,
+                        graphing, diffing, and exporting. Global flags: <code>--quiet</code>,
+                        <code>-v</code>, <code>-vv</code>.
+                    </p>
+                    <div class="code">
+                        <pre><span class="cmt"># Watch roots for filesystem changes</span>
+organon watch .
+
+<span class="cmt"># Find entities with metadata filters</span>
+organon find --state active --ext rs
+organon find --modified-after 2026-01-01 --larger-than-mb 10
+organon find --created-after 2026-01-01
+
+<span class="cmt"># Semantic + full-text search with filters</span>
+organon search "watcher" --state active --ext rs --mode hybrid
+organon search "sqlite graph" --modified-after 2026-01-01
+organon search "embedding model" --mode vector
+
+<span class="cmt"># Graph relationships — text, DOT, or Mermaid output</span>
+organon graph path/to/file.rs --depth 2 --format text
+organon graph path/to/file.rs --format dot
+organon graph path/to/file.rs --format mermaid
+
+<span class="cmt"># Diff filesystem vs DB, export data</span>
+organon diff .
+organon diff . --json
+organon export --format json
+organon export --format csv --output entities.csv
+organon export --format dot --output graph.dot
+
+<span class="cmt"># Recompute summary for one entity</span>
+organon summarize path/to/file.rs --model llama3.2</pre>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Stack -->
+            <section id="stack" class="section card">
+                <div class="section-header">
+                    <span class="section-index">05</span>
+                    <h2 class="section-title">Stack</h2>
+                </div>
+                <div class="section-body">
+                    <p class="section-lead">
+                        Every dependency chosen for local-first, agent-native operation —
+                        nothing in the critical path requires a network call.
+                    </p>
+                    <div class="table-wrap">
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th>Layer</th>
+                                    <th>Technology</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <tr>
+                                    <td>Core daemon</td>
+                                    <td><code>Rust</code> — notify · tokio · rusqlite · tantivy</td>
+                                </tr>
+                                <tr>
+                                    <td>Semantic vectors</td>
+                                    <td><code>Python</code> — fastembed · lancedb</td>
+                                </tr>
+                                <tr>
+                                    <td>Content extraction</td>
+                                    <td><code>Python</code> — text · PDF · code · images</td>
+                                </tr>
+                                <tr>
+                                    <td>Local LLM</td>
+                                    <td><code>ollama</code> — summaries via any local model</td>
+                                </tr>
+                                <tr>
+                                    <td>Agent protocol</td>
+                                    <td><code>MCP</code> — Model Context Protocol</td>
+                                </tr>
+                                <tr>
+                                    <td>Storage</td>
+                                    <td><code>SQLite + LanceDB</code> — 100% on-disk</td>
+                                </tr>
+                                <tr>
+                                    <td>Future UI</td>
+                                    <td><code>Tauri</code> — macOS menu bar app</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                    <p class="note">
+                        Install dependencies with <code>uv sync</code> (Python layer) and
+                        <code>cargo build --release</code> (Rust core). See
+                        <code>setup.sh</code> for full bootstrapping.
+                    </p>
+                </div>
+            </section>
+
+            <footer class="footer">
+                <span><span data-year></span> Organon</span>
+                <span class="footer-mark">©</span>
+                <a href="https://github.com/andrii-su/organon">GitHub</a>
+            </footer>
+        </main>
+
+        <script src="./app.js" defer></script>
+    </body>
+</html>
