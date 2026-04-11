@@ -1,6 +1,6 @@
 use organon_core::{
     entity::{Entity, LifecycleState},
-    graph::{FindFilter, Graph},
+    graph::{FindFilter, Graph, RenameOutcome},
 };
 use tempfile::NamedTempFile;
 
@@ -281,6 +281,152 @@ fn delete_stale_relations_removes_orphans() {
     let deleted = graph.delete_stale_relations().unwrap();
     assert_eq!(deleted, 1);
     assert!(graph.stale_relations().unwrap().is_empty());
+}
+
+// ── rename_entity ──────────────────────────────────────────────────────────────
+
+#[test]
+fn rename_entity_updates_path() {
+    let (graph, _f) = temp_graph();
+    let mut e = test_entity("/tmp/old.rs");
+    e.summary = Some("preserved summary".to_string());
+    graph.upsert(&e).unwrap();
+
+    let outcome = graph.rename_entity("/tmp/old.rs", "/tmp/new.rs").unwrap();
+    assert_eq!(outcome, RenameOutcome::Renamed);
+
+    assert!(graph.get_by_path("/tmp/old.rs").unwrap().is_none());
+    let got = graph.get_by_path("/tmp/new.rs").unwrap().unwrap();
+    assert_eq!(got.path, "/tmp/new.rs");
+    assert_eq!(got.name, "new.rs");
+    assert_eq!(got.extension.as_deref(), Some("rs"));
+    assert_eq!(got.summary.as_deref(), Some("preserved summary"));
+}
+
+#[test]
+fn rename_entity_preserves_id_and_lifecycle() {
+    let (graph, _f) = temp_graph();
+    let mut e = test_entity("/tmp/a.rs");
+    e.lifecycle = LifecycleState::Dormant;
+    graph.upsert(&e).unwrap();
+    let original_id = graph.get_by_path("/tmp/a.rs").unwrap().unwrap().id;
+
+    graph.rename_entity("/tmp/a.rs", "/tmp/b.rs").unwrap();
+
+    let got = graph.get_by_path("/tmp/b.rs").unwrap().unwrap();
+    assert_eq!(got.id, original_id, "id must not change on rename");
+    assert_eq!(got.lifecycle, LifecycleState::Dormant);
+}
+
+#[test]
+fn rename_entity_updates_outgoing_relations() {
+    let (graph, _f) = temp_graph();
+    graph.upsert(&test_entity("/tmp/src.rs")).unwrap();
+    graph.upsert(&test_entity("/tmp/dep.rs")).unwrap();
+    graph.upsert_relation("/tmp/src.rs", "/tmp/dep.rs", "mod").unwrap();
+
+    graph.rename_entity("/tmp/src.rs", "/tmp/renamed_src.rs").unwrap();
+
+    let rels = graph.get_relations("/tmp/renamed_src.rs").unwrap();
+    assert_eq!(rels.len(), 1);
+    assert_eq!(rels[0].0, "/tmp/renamed_src.rs");
+    assert_eq!(rels[0].1, "/tmp/dep.rs");
+
+    // old path must have no relations
+    assert!(graph.get_relations("/tmp/src.rs").unwrap().is_empty());
+}
+
+#[test]
+fn rename_entity_updates_incoming_relations() {
+    let (graph, _f) = temp_graph();
+    graph.upsert(&test_entity("/tmp/caller.rs")).unwrap();
+    graph.upsert(&test_entity("/tmp/target.rs")).unwrap();
+    graph.upsert_relation("/tmp/caller.rs", "/tmp/target.rs", "imports").unwrap();
+
+    graph.rename_entity("/tmp/target.rs", "/tmp/target_v2.rs").unwrap();
+
+    let rels = graph.get_relations("/tmp/target_v2.rs").unwrap();
+    assert_eq!(rels.len(), 1);
+    assert_eq!(rels[0].1, "/tmp/target_v2.rs");
+    assert!(graph.get_relations("/tmp/target.rs").unwrap().is_empty());
+}
+
+#[test]
+fn rename_entity_does_not_create_duplicate() {
+    let (graph, _f) = temp_graph();
+    graph.upsert(&test_entity("/tmp/orig.rs")).unwrap();
+    graph.rename_entity("/tmp/orig.rs", "/tmp/moved.rs").unwrap();
+
+    let all = graph.all().unwrap();
+    assert_eq!(all.len(), 1, "rename must not create a duplicate entity");
+}
+
+#[test]
+fn rename_entity_old_not_found_returns_outcome() {
+    let (graph, _f) = temp_graph();
+    let outcome = graph.rename_entity("/tmp/ghost.rs", "/tmp/new.rs").unwrap();
+    assert_eq!(outcome, RenameOutcome::OldNotFound);
+}
+
+#[test]
+fn rename_entity_over_existing_resolves_conflict() {
+    let (graph, _f) = temp_graph();
+    let mut old = test_entity("/tmp/old.rs");
+    old.summary = Some("old summary".to_string());
+    graph.upsert(&old).unwrap();
+    // new_path already exists (would be overwritten by OS rename)
+    graph.upsert(&test_entity("/tmp/new.rs")).unwrap();
+    graph.upsert_relation("/tmp/caller.rs", "/tmp/new.rs", "mod").unwrap();
+
+    let outcome = graph.rename_entity("/tmp/old.rs", "/tmp/new.rs").unwrap();
+    assert_eq!(outcome, RenameOutcome::ConflictResolved);
+
+    // old path gone, new path has old entity's data
+    assert!(graph.get_by_path("/tmp/old.rs").unwrap().is_none());
+    let got = graph.get_by_path("/tmp/new.rs").unwrap().unwrap();
+    assert_eq!(got.summary.as_deref(), Some("old summary"));
+
+    // relations to the overwritten entity were removed
+    assert!(graph.get_relations("/tmp/caller.rs").unwrap().is_empty());
+}
+
+#[test]
+fn rename_preserves_relation_dedup() {
+    // If src already had a relation to new_path before rename, no duplicate is created.
+    let (graph, _f) = temp_graph();
+    graph.upsert(&test_entity("/tmp/src.rs")).unwrap();
+    graph.upsert(&test_entity("/tmp/dep.rs")).unwrap();
+    graph.upsert(&test_entity("/tmp/other.rs")).unwrap();
+    graph.upsert_relation("/tmp/src.rs", "/tmp/dep.rs", "mod").unwrap();
+    // also: src already imports other.rs (which is about to be renamed to dep.rs target)
+    // Edge: some X already points to the new_path... set up a different scenario:
+    // src has both (src→dep) and (src→other); rename other→dep2
+    graph.upsert_relation("/tmp/src.rs", "/tmp/other.rs", "mod").unwrap();
+    graph.rename_entity("/tmp/other.rs", "/tmp/dep2.rs").unwrap();
+
+    let rels = graph.get_relations("/tmp/src.rs").unwrap();
+    assert_eq!(rels.len(), 2);
+}
+
+#[test]
+fn get_by_hash_returns_matching_entities() {
+    let (graph, _f) = temp_graph();
+    let mut e1 = test_entity("/tmp/f1.rs");
+    e1.content_hash = Some("deadbeef".to_string());
+    let mut e2 = test_entity("/tmp/f2.rs");
+    e2.content_hash = Some("deadbeef".to_string());
+    let mut e3 = test_entity("/tmp/f3.rs");
+    e3.content_hash = Some("cafecafe".to_string());
+
+    graph.upsert(&e1).unwrap();
+    graph.upsert(&e2).unwrap();
+    graph.upsert(&e3).unwrap();
+
+    let matches = graph.get_by_hash("deadbeef").unwrap();
+    assert_eq!(matches.len(), 2);
+    let paths: Vec<_> = matches.iter().map(|e| e.path.as_str()).collect();
+    assert!(paths.contains(&"/tmp/f1.rs"));
+    assert!(paths.contains(&"/tmp/f2.rs"));
 }
 
 #[test]
