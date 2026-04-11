@@ -1,0 +1,47 @@
+name: Docs
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url || '' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Pages
+        id: setup_pages
+        uses: actions/configure-pages@v6
+        continue-on-error: true
+
+      - name: Skip when Pages is not enabled
+        if: steps.setup_pages.outcome != 'success'
+        run: |
+          echo "::notice title=Pages disabled::GitHub Pages is not enabled for this repository yet. Skipping docs deployment."
+
+      - name: Upload docs artifact
+        if: steps.setup_pages.outcome == 'success'
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: docs
+
+      - name: Deploy to GitHub Pages
+        if: steps.setup_pages.outcome == 'success'
+        id: deployment
+        uses: actions/deploy-pages@v5

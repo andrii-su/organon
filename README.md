@@ -59,6 +59,41 @@ ai/
 
 🌱 Early development — building the core entity graph.
 
+## CLI Highlights
+
+```bash
+# watch one or more roots (CLI path + config.watch.roots)
+organon watch .
+
+# metadata find with old and new filters
+organon find --state active --ext rs
+organon find --modified-after 2026-01-01 --larger-than-mb 10
+organon find --created-after 2026-01-01
+
+# search with metadata filters across vector / fts / hybrid
+organon search "watcher" --state active --ext rs --mode hybrid
+organon search "sqlite graph" --modified-after 2026-01-01
+
+# graph output, cycle warnings, export-friendly formats
+organon graph path/to/file.rs --depth 2 --format text
+organon graph path/to/file.rs --format dot
+organon graph path/to/file.rs --format mermaid
+
+# compare filesystem vs DB, export data, recompute one summary
+organon diff .
+organon diff . --json
+organon export --format json
+organon export --format csv --output entities.csv
+organon export --format dot --output graph.dot
+organon summarize path/to/file.rs --model llama3.2
+```
+
+Global logging flags:
+
+- `--quiet` keeps output near-silent except errors
+- `-v` enables info logs
+- `-vv` enables debug logs
+
 ## Roadmap
 
 - [ ] `organon-core`: filesystem watcher + SQLite entity graph
