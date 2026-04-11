@@ -1,25 +1,39 @@
-use notify::{RecommendedWatcher, RecursiveMode, Result, Watcher, Event};
-use std::sync::mpsc::channel;
-use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+
+use anyhow::Result;
+use organon_core::{graph::Graph, scanner, watcher};
 
 fn main() -> Result<()> {
     env_logger::init();
-    println!("organon-core watcher PoC starting");
 
-    let (tx, rx) = channel();
-    // RecommendedWatcher uses the best available watcher for platform
-    let mut watcher: RecommendedWatcher = Watcher::new(tx, std::time::Duration::from_secs(2))?;
+    let db_path = std::env::var("ORGANON_DB")
+        .unwrap_or_else(|_| format!("{}/.organon/entities.db",
+            std::env::var("HOME").unwrap_or_else(|_| ".".to_string())));
 
-    let path = std::env::args().nth(1).unwrap_or(".".to_string());
-    println!("watching: {}", path);
-    watcher.watch(PathBuf::from(&path), RecursiveMode::Recursive)?;
+    let watch_path = std::env::args().nth(1).unwrap_or_else(|| ".".to_string());
 
-    loop {
-        match rx.recv() {
-            Ok(event) => {
-                println!("event: {:?}", event);
-            }
-            Err(e) => println!("watch error: {:?}", e),
-        }
+    if let Some(parent) = std::path::Path::new(&db_path).parent() {
+        std::fs::create_dir_all(parent)?;
     }
+
+    let graph = Arc::new(Mutex::new(Graph::open(&db_path)?));
+    log::info!("organon-core started. db={} watch={}", db_path, watch_path);
+
+    // Phase 1a: index existing files
+    let stats = scanner::scan(&watch_path, Arc::clone(&graph))?;
+    println!(
+        "indexed {} files ({} skipped, {} errors)",
+        stats.indexed, stats.skipped, stats.errors
+    );
+
+    // Phase 1b: refresh lifecycle states
+    scanner::refresh_lifecycle(Arc::clone(&graph))?;
+
+    // Phase 1c: periodic lifecycle refresh every 6 hours
+    let _refresh_handle = scanner::schedule_lifecycle_refresh(Arc::clone(&graph), 6);
+
+    // Phase 1d: watch for changes
+    watcher::watch(&watch_path, graph)?;
+
+    Ok(())
 }
