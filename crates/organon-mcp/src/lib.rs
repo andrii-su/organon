@@ -242,7 +242,6 @@ impl McpService {
 }
 
 impl McpService {
-
     pub fn get_entity(&self, path: &str) -> Result<Option<Entity>> {
         self.open_graph()?.get_by_path(path)
     }

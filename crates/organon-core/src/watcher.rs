@@ -316,9 +316,7 @@ fn handle_create(
             info!("detected rename: {old_path} → {path_str}");
             match graph.lock().unwrap().rename_entity(&old_path, &path_str) {
                 Ok(outcome) => {
-                    info!(
-                        "rename applied ({outcome:?}): {old_path} → {path_str}"
-                    );
+                    info!("rename applied ({outcome:?}): {old_path} → {path_str}");
                     // Also update mtime/size via upsert to reflect any metadata change.
                     // The id / summary / lifecycle are preserved by rename_entity.
                     if let Err(e) = graph.lock().unwrap().upsert(&entity) {

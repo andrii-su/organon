@@ -398,9 +398,7 @@ impl Graph {
             "DELETE FROM relationships WHERE from_path = ?1",
             params![from_path],
         )?;
-        debug!(
-            "delete_relations_from: {n} edges removed for {from_path}"
-        );
+        debug!("delete_relations_from: {n} edges removed for {from_path}");
         Ok(n)
     }
 

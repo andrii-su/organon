@@ -646,9 +646,7 @@ fn cmd_clean(
         0
     };
 
-    println!(
-        "removed {dead_deleted} dead entities and {stale_deleted} stale relations"
-    );
+    println!("removed {dead_deleted} dead entities and {stale_deleted} stale relations");
     Ok(())
 }
 
@@ -719,9 +717,7 @@ fn cmd_search(
         limit,
         offset: 0,
     })?;
-    info!(
-        "search: {query:?} limit={limit} dir={dir:?} mode={mode:?} explain={explain}"
-    );
+    info!("search: {query:?} limit={limit} dir={dir:?} mode={mode:?} explain={explain}");
     let results = search_entities(SearchParams {
         query,
         limit,
@@ -1018,7 +1014,12 @@ fn cmd_api(
 ) -> Result<()> {
     let _ = env_logger::try_init();
     let runtime = tokio::runtime::Runtime::new()?;
-    runtime.block_on(api::serve(db_path.to_path_buf(), config.clone(), host, port))
+    runtime.block_on(api::serve(
+        db_path.to_path_buf(),
+        config.clone(),
+        host,
+        port,
+    ))
 }
 
 fn cmd_archive(dry_run: bool, apply: bool, dir: Option<&Path>, db_path: &Path) -> Result<()> {
@@ -1091,9 +1092,7 @@ fn cmd_graph(path: &PathBuf, depth: u8, format: GraphFormat, db_path: &Path) -> 
     let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.clone());
     let path_str = canonical.to_string_lossy();
     let depth_clamped = depth.min(3);
-    info!(
-        "graph: {path_str} depth={depth_clamped} format={format:?}"
-    );
+    info!("graph: {path_str} depth={depth_clamped} format={format:?}");
 
     let view = build_relation_graph(&graph, path_str.as_ref(), depth_clamped)?;
     let rendered = match format {
@@ -1338,7 +1337,8 @@ fn build_find_filter(params: FindFilterParams) -> Result<FindFilter> {
     Ok(FindFilter {
         state: params.state,
         extension: params.extension.map(normalize_extension),
-        created_after: params.created_after
+        created_after: params
+            .created_after
             .as_deref()
             .map(parse_date_to_timestamp)
             .transpose()?,

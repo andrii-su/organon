@@ -33,9 +33,7 @@ fn main() -> Result<()> {
         .map(|root| root.display().to_string())
         .collect::<Vec<_>>()
         .join(", ");
-    log::info!(
-        "organon-core started. db={db_path} watch=[{joined_roots}]"
-    );
+    log::info!("organon-core started. db={db_path} watch=[{joined_roots}]");
 
     // Phase 1a: index existing files
     let mut stats = scanner::ScanStats {

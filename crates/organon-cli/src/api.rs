@@ -818,7 +818,8 @@ fn build_find_filter(params: FindFilterParams) -> Result<FindFilter> {
     Ok(FindFilter {
         state: params.state,
         extension: params.extension.map(normalize_extension),
-        created_after: params.created_after
+        created_after: params
+            .created_after
             .as_deref()
             .map(parse_date_to_timestamp)
             .transpose()?,

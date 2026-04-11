@@ -81,9 +81,10 @@ impl IgnoreSet {
             && path.components().any(|c| {
                 let s = c.as_os_str().to_string_lossy();
                 self.extra_segments.iter().any(|seg| seg == s.as_ref())
-            }) {
-                return true;
-            }
+            })
+        {
+            return true;
+        }
 
         // Layer 3: .organonignore gitignore rules
         if let Some(gi) = &self.gitignore {
