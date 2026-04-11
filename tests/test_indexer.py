@@ -5,7 +5,7 @@ from unittest.mock import MagicMock, call, patch
 
 import pytest
 
-from ai.indexer import get_entities, run_once, summarize_file
+from ai.indexer import get_entities, reconcile_lancedb_paths, run_once, summarize_file
 
 
 # ── fixtures ──────────────────────────────────────────────────────────────────
@@ -273,6 +273,107 @@ def test_summarize_file_recomputes_and_stores_summary(tmp_db):
 
     assert summary == "Fresh summary"
     assert stored == "Fresh summary"
+
+
+# ── reconcile_lancedb_paths ───────────────────────────────────────────────────
+
+def test_reconcile_updates_stale_path(tmp_db):
+    """Lancedb entry whose path no longer exists in SQLite but hash matches a
+    new SQLite path should have its path updated."""
+    # main.py was renamed to main_v2.py in SQLite (simulate by changing DB)
+    conn = sqlite3.connect(str(tmp_db))
+    conn.execute(
+        "UPDATE entities SET path = ?, name = ? WHERE path = ?",
+        ("/src/main_v2.py", "main_v2.py", "/src/main.py"),
+    )
+    conn.commit()
+    conn.close()
+
+    # lancedb still has the old path
+    stale_entries = [{"path": "/src/main.py", "content_hash": "hash_main"}]
+
+    with (
+        patch("ai.indexer.get_all_entries", return_value=stale_entries),
+        patch("ai.indexer.update_path_in_store", return_value=True) as mock_update,
+    ):
+        count = reconcile_lancedb_paths(tmp_db)
+
+    assert count == 1
+    mock_update.assert_called_once_with("/src/main.py", "/src/main_v2.py", db_path=None)
+
+
+def test_reconcile_skips_valid_paths(tmp_db):
+    """Lancedb entries whose path is still present in SQLite are not touched."""
+    ldb_entries = [
+        {"path": "/src/main.py",  "content_hash": "hash_main"},
+        {"path": "/src/utils.py", "content_hash": "hash_utils"},
+    ]
+    with (
+        patch("ai.indexer.get_all_entries", return_value=ldb_entries),
+        patch("ai.indexer.update_path_in_store") as mock_update,
+    ):
+        count = reconcile_lancedb_paths(tmp_db)
+
+    assert count == 0
+    mock_update.assert_not_called()
+
+
+def test_reconcile_skips_ambiguous_hash(tmp_db):
+    """If multiple SQLite entities share the same hash as a stale lancedb entry,
+    the entry is NOT updated (ambiguous)."""
+    # Give main.py and utils.py the same hash
+    conn = sqlite3.connect(str(tmp_db))
+    conn.execute("UPDATE entities SET content_hash = ? WHERE path = ?", ("same", "/src/utils.py"))
+    conn.execute("UPDATE entities SET content_hash = ? WHERE path = ?", ("same", "/src/main.py"))
+    conn.commit()
+    conn.close()
+
+    ldb_entries = [{"path": "/src/old.py", "content_hash": "same"}]
+    with (
+        patch("ai.indexer.get_all_entries", return_value=ldb_entries),
+        patch("ai.indexer.update_path_in_store") as mock_update,
+    ):
+        count = reconcile_lancedb_paths(tmp_db)
+
+    assert count == 0
+    mock_update.assert_not_called()
+
+
+def test_reconcile_skips_when_no_sqlite_match(tmp_db):
+    """Stale lancedb path with no hash match in SQLite → not updated (orphan)."""
+    ldb_entries = [{"path": "/old/orphan.py", "content_hash": "unknown_hash"}]
+    with (
+        patch("ai.indexer.get_all_entries", return_value=ldb_entries),
+        patch("ai.indexer.update_path_in_store") as mock_update,
+    ):
+        count = reconcile_lancedb_paths(tmp_db)
+
+    assert count == 0
+    mock_update.assert_not_called()
+
+
+def test_reconcile_is_nonfatal_on_error(tmp_db):
+    """If reconciliation fails for a single entry, the rest still proceed."""
+    conn = sqlite3.connect(str(tmp_db))
+    conn.execute("UPDATE entities SET path = ? WHERE path = ?", ("/src/a_v2.py", "/src/main.py"))
+    conn.execute("UPDATE entities SET path = ? WHERE path = ?", ("/src/b_v2.py", "/src/utils.py"))
+    conn.commit()
+    conn.close()
+
+    ldb_entries = [
+        {"path": "/src/main.py",  "content_hash": "hash_main"},
+        {"path": "/src/utils.py", "content_hash": "hash_utils"},
+    ]
+
+    results = iter([False, True])
+    with (
+        patch("ai.indexer.get_all_entries", return_value=ldb_entries),
+        patch("ai.indexer.update_path_in_store", side_effect=results),
+    ):
+        count = reconcile_lancedb_paths(tmp_db)
+
+    # Only 1 succeeded (False=fail, True=success)
+    assert count == 1
 
 
 def test_run_once_empty_db(tmp_path):
