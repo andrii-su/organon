@@ -5,7 +5,7 @@ from unittest.mock import MagicMock, call, patch
 
 import pytest
 
-from ai.indexer import get_entities, run_once
+from ai.indexer import get_entities, run_once, summarize_file
 
 
 # ── fixtures ──────────────────────────────────────────────────────────────────
@@ -91,11 +91,11 @@ def test_run_once_skips_already_indexed(tmp_db):
     ):
         stats = run_once(tmp_db)
 
-    assert stats["skipped"] >= 1
     # only utils.py should be indexed (main.py skipped)
     indexed_paths = [c.args[0] for c in mock_index.call_args_list]
     assert "/src/main.py" not in indexed_paths
     assert "/src/utils.py" in indexed_paths
+    assert stats["indexed"] == 1
 
 
 def test_run_once_skips_no_text(tmp_db):
@@ -157,6 +157,39 @@ def test_run_once_extracts_relations(tmp_db):
     assert call_args.kwargs["db_path"] == tmp_db
 
 
+def test_run_once_replaces_stale_outgoing_relations(tmp_db):
+    with (
+        patch("ai.indexer.extract_text", return_value="content"),
+        patch("ai.indexer.index_file"),
+        patch("ai.indexer.get_indexed_hashes", return_value=set()),
+        patch("ai.indexer.extract_relations", return_value=[("/src/main.py", "/src/utils.py", "imports")]),
+    ):
+        run_once(tmp_db)
+
+    conn = sqlite3.connect(str(tmp_db))
+    conn.execute(
+        "UPDATE entities SET content_hash = ? WHERE path = ?",
+        ("hash_main_v2", "/src/main.py"),
+    )
+    conn.commit()
+    conn.close()
+
+    with (
+        patch("ai.indexer.extract_text", return_value="content changed"),
+        patch("ai.indexer.index_file"),
+        patch("ai.indexer.get_indexed_hashes", return_value={"hash_main", "hash_utils"}),
+        patch("ai.indexer.extract_relations", return_value=[("/src/main.py", "/src/other.py", "imports")]),
+    ):
+        run_once(tmp_db)
+
+    conn = sqlite3.connect(str(tmp_db))
+    rows = conn.execute(
+        "SELECT from_path, to_path, kind FROM relationships ORDER BY from_path, to_path"
+    ).fetchall()
+    conn.close()
+    assert rows == [("/src/main.py", "/src/other.py", "imports")]
+
+
 def test_run_once_returns_all_stat_keys(tmp_db):
     with (
         patch("ai.indexer.extract_text", return_value="x"),
@@ -168,6 +201,78 @@ def test_run_once_returns_all_stat_keys(tmp_db):
         stats = run_once(tmp_db)
 
     assert {"total", "indexed", "skipped", "errors"} == set(stats.keys())
+
+
+def test_run_once_updates_fts(tmp_db):
+    with (
+        patch("ai.indexer.extract_text", return_value="Rust graph and SQLite index"),
+        patch("ai.indexer.index_file"),
+        patch("ai.indexer.get_indexed_hashes", return_value=set()),
+        patch("ai.indexer.extract_relations", return_value=[]),
+        patch("ai.indexer.upsert_relations"),
+    ):
+        run_once(tmp_db)
+
+    conn = sqlite3.connect(str(tmp_db))
+    rows = conn.execute("SELECT path FROM entities_fts ORDER BY path").fetchall()
+    conn.close()
+    assert [r[0] for r in rows] == ["/src/main.py", "/src/utils.py"]
+
+
+def test_run_once_backfills_fts_when_vectors_already_exist(tmp_db):
+    with (
+        patch("ai.indexer.extract_text", return_value="content"),
+        patch("ai.indexer.index_file") as mock_index,
+        patch("ai.indexer.get_indexed_hashes", return_value={"hash_main", "hash_utils"}),
+        patch("ai.indexer.extract_relations", return_value=[]),
+        patch("ai.indexer.upsert_relations"),
+    ):
+        stats = run_once(tmp_db)
+
+    conn = sqlite3.connect(str(tmp_db))
+    count = conn.execute("SELECT COUNT(*) FROM entities_fts").fetchone()[0]
+    conn.close()
+    assert count == 2
+    assert mock_index.call_count == 0
+    assert stats["indexed"] == 0
+
+
+def test_run_once_stores_summary_when_enabled(tmp_db):
+    with (
+        patch("ai.indexer.extract_text", return_value="content"),
+        patch("ai.indexer.index_file"),
+        patch("ai.indexer.get_indexed_hashes", return_value=set()),
+        patch("ai.indexer.summarize_text", return_value="Short summary"),
+        patch("ai.indexer.extract_relations", return_value=[]),
+        patch("ai.indexer.upsert_relations"),
+    ):
+        run_once(tmp_db, summarize=True, ollama_model="test-model")
+
+    conn = sqlite3.connect(str(tmp_db))
+    summaries = conn.execute(
+        "SELECT DISTINCT summary FROM entities "
+        "WHERE lifecycle = 'active' AND content_hash IS NOT NULL"
+    ).fetchall()
+    conn.close()
+    assert summaries == [("Short summary",)]
+
+
+def test_summarize_file_recomputes_and_stores_summary(tmp_db):
+    with (
+        patch("ai.indexer.extract_text", return_value="fresh content"),
+        patch("ai.indexer.summarize_text", return_value="Fresh summary"),
+    ):
+        summary = summarize_file(tmp_db, "/src/main.py", model="test-model")
+
+    conn = sqlite3.connect(str(tmp_db))
+    stored = conn.execute(
+        "SELECT summary FROM entities WHERE path = ?",
+        ("/src/main.py",),
+    ).fetchone()[0]
+    conn.close()
+
+    assert summary == "Fresh summary"
+    assert stored == "Fresh summary"
 
 
 def test_run_once_empty_db(tmp_path):
