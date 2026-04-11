@@ -52,7 +52,7 @@ impl IgnoreSet {
         }
         let mut builder = GitignoreBuilder::new(root);
         if let Some(e) = builder.add(file.clone()) {
-            debug!(".organonignore add error: {:?}", e);
+            debug!(".organonignore add error: {e:?}");
             return None;
         }
         match builder.build() {
@@ -61,7 +61,7 @@ impl IgnoreSet {
                 Some(gi)
             }
             Err(e) => {
-                debug!(".organonignore build error: {:?}", e);
+                debug!(".organonignore build error: {e:?}");
                 None
             }
         }
@@ -77,14 +77,13 @@ impl IgnoreSet {
         }
 
         // Layer 2: extra segments from config
-        if !self.extra_segments.is_empty() {
-            if path.components().any(|c| {
+        if !self.extra_segments.is_empty()
+            && path.components().any(|c| {
                 let s = c.as_os_str().to_string_lossy();
                 self.extra_segments.iter().any(|seg| seg == s.as_ref())
             }) {
                 return true;
             }
-        }
 
         // Layer 3: .organonignore gitignore rules
         if let Some(gi) = &self.gitignore {

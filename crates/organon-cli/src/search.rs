@@ -108,18 +108,20 @@ pub fn default_search_mode(config: &OrgConfig) -> SearchMode {
     }
 }
 
-pub fn search_entities(
-    query: &str,
-    limit: usize,
-    offset: usize,
-    dir: Option<&Path>,
-    mode: SearchMode,
-    metadata_filter: &FindFilter,
-    config: &OrgConfig,
-    db_path: &Path,
-    explain: bool,
-) -> Result<SearchPage> {
-    let path_prefix = dir.map(|p| {
+pub struct SearchParams<'a> {
+    pub query: &'a str,
+    pub limit: usize,
+    pub offset: usize,
+    pub dir: Option<&'a Path>,
+    pub mode: SearchMode,
+    pub metadata_filter: &'a FindFilter,
+    pub config: &'a OrgConfig,
+    pub db_path: &'a Path,
+    pub explain: bool,
+}
+
+pub fn search_entities(params: SearchParams) -> Result<SearchPage> {
+    let path_prefix = params.dir.map(|p| {
         std::fs::canonicalize(p)
             .unwrap_or_else(|_| p.to_path_buf())
             .to_string_lossy()
@@ -127,33 +129,33 @@ pub fn search_entities(
     });
 
     let mut merged: BTreeMap<String, MergeEntry> = BTreeMap::new();
-    let desired = (limit + offset).max(1);
-    let candidate_limit = if metadata_filter_requested(metadata_filter) {
+    let desired = (params.limit + params.offset).max(1);
+    let candidate_limit = if metadata_filter_requested(params.metadata_filter) {
         desired.saturating_mul(12)
     } else {
         desired.saturating_mul(4)
     };
 
-    if matches!(mode, SearchMode::Vector | SearchMode::Hybrid) {
+    if matches!(params.mode, SearchMode::Vector | SearchMode::Hybrid) {
         let output = python_run_with_env(
             &[
                 "-c",
                 &format!(
                     "from ai.embeddings.store import search; import json; \
                      print(json.dumps(search({:?}, limit={}, db_path={:?}, path_prefix={})))",
-                    query,
+                    params.query,
                     candidate_limit,
-                    config.indexer.vectors_path,
+                    params.config.indexer.vectors_path,
                     path_prefix
                         .as_ref()
                         .map(|p| format!("{p:?}"))
                         .unwrap_or_else(|| "None".to_string())
                 ),
             ],
-            &python_env(config),
+            &python_env(params.config),
         )?;
         let results: Vec<serde_json::Value> = serde_json::from_str(&output)?;
-        let weight = if matches!(mode, SearchMode::Hybrid) {
+        let weight = if matches!(params.mode, SearchMode::Hybrid) {
             0.7
         } else {
             1.0
@@ -187,13 +189,13 @@ pub fn search_entities(
         }
     }
 
-    if matches!(mode, SearchMode::Fts | SearchMode::Hybrid) {
-        let graph = Graph::open(db_path.to_string_lossy().as_ref())?;
-        let mut results = graph.fts_search(query, candidate_limit)?;
+    if matches!(params.mode, SearchMode::Fts | SearchMode::Hybrid) {
+        let graph = Graph::open(params.db_path.to_string_lossy().as_ref())?;
+        let mut results = graph.fts_search(params.query, candidate_limit)?;
         if let Some(prefix) = &path_prefix {
             results.retain(|(path, _)| path.starts_with(prefix));
         }
-        let weight = if matches!(mode, SearchMode::Hybrid) {
+        let weight = if matches!(params.mode, SearchMode::Hybrid) {
             0.3
         } else {
             1.0
@@ -224,15 +226,15 @@ pub fn search_entities(
 
     let mut results: Vec<_> = merged.into_iter().collect();
     results.sort_by(|a, b| b.1.combined_score.total_cmp(&a.1.combined_score));
-    if metadata_filter_requested(metadata_filter) {
-        let graph = Graph::open(db_path.to_string_lossy().as_ref())?;
-        results = apply_metadata_filter(results, &graph, metadata_filter)?;
+    if metadata_filter_requested(params.metadata_filter) {
+        let graph = Graph::open(params.db_path.to_string_lossy().as_ref())?;
+        results = apply_metadata_filter(results, &graph, params.metadata_filter)?;
     }
     let total = results.len();
     let items = results
         .into_iter()
-        .skip(offset)
-        .take(limit)
+        .skip(params.offset)
+        .take(params.limit)
         .map(|(path, entry)| {
             let source = match (entry.from_vector, entry.from_fts) {
                 (true, true) => "hybrid".to_string(),
@@ -240,8 +242,8 @@ pub fn search_entities(
                 (false, true) => "fts".to_string(),
                 (false, false) => "-".to_string(),
             };
-            let explanation = if explain {
-                Some(build_explanation(query, &path, &entry, mode))
+            let explanation = if params.explain {
+                Some(build_explanation(params.query, &path, &entry, params.mode))
             } else {
                 None
             };
@@ -257,9 +259,9 @@ pub fn search_entities(
     Ok(SearchPage {
         items,
         total,
-        limit,
-        offset,
-        has_more: offset + limit < total,
+        limit: params.limit,
+        offset: params.offset,
+        has_more: params.offset + params.limit < total,
     })
 }
 

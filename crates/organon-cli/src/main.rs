@@ -24,7 +24,7 @@ use organon_core::{
 
 use format::{format_ts, human_bytes};
 use python::{python_exec_with_env, python_run_with_env};
-use search::{default_search_mode, python_env, search_entities, SearchMode};
+use search::{default_search_mode, python_env, search_entities, SearchMode, SearchParams};
 
 #[derive(Parser)]
 #[command(name = "organon", about = "Local semantic filesystem layer", version)]
@@ -374,7 +374,7 @@ fn config_path() -> PathBuf {
         })
 }
 
-fn open_graph(db_path: &PathBuf) -> Result<Graph> {
+fn open_graph(db_path: &Path) -> Result<Graph> {
     if !db_path.exists() {
         bail!(
             "DB not found: {}\nRun `organon watch <dir>` first.",
@@ -386,7 +386,7 @@ fn open_graph(db_path: &PathBuf) -> Result<Graph> {
 
 fn cmd_watch(
     path: Option<PathBuf>,
-    db_path: &PathBuf,
+    db_path: &Path,
     config: &OrgConfig,
     index_interval: Option<u64>,
     no_index: bool,
@@ -471,16 +471,14 @@ fn cmd_watch(
             }
             Err(e) => {
                 eprintln!(
-                    "warning: could not start indexer: {} (run `organon index --watch {}` manually)",
-                    e, index_interval
+                    "warning: could not start indexer: {e} (run `organon index --watch {index_interval}` manually)"
                 );
                 None
             }
         }
     } else {
         eprintln!(
-            "indexer disabled (--no-index). Run `organon index --watch {}` manually.",
-            index_interval
+            "indexer disabled (--no-index). Run `organon index --watch {index_interval}` manually."
         );
         None
     };
@@ -488,14 +486,14 @@ fn cmd_watch(
     organon_core::watcher::watch_many(&watch_roots, graph, config.watch.use_git_timestamps)
 }
 
-fn cmd_status(path: PathBuf, db_path: &PathBuf) -> Result<()> {
+fn cmd_status(path: PathBuf, db_path: &Path) -> Result<()> {
     let graph = open_graph(db_path)?;
     let canonical = std::fs::canonicalize(&path).unwrap_or(path.clone());
     let path_str = canonical.to_string_lossy();
-    debug!("status: {}", path_str);
+    debug!("status: {path_str}");
 
     match graph.get_by_path(&path_str)? {
-        None => bail!("not found in graph: {}", path_str),
+        None => bail!("not found in graph: {path_str}"),
         Some(e) => {
             println!("path:       {}", e.path);
             println!("lifecycle:  {}", e.lifecycle.as_str());
@@ -507,17 +505,17 @@ fn cmd_status(path: PathBuf, db_path: &PathBuf) -> Result<()> {
                 println!("hash:       {}...", &h[..16.min(h.len())]);
             }
             if let Some(author) = &e.git_author {
-                println!("git author: {}", author);
+                println!("git author: {author}");
             }
             if let Some(s) = &e.summary {
-                println!("summary:    {}", s);
+                println!("summary:    {s}");
             }
         }
     }
     Ok(())
 }
 
-fn cmd_ls(state: Option<&str>, limit: usize, db_path: &PathBuf) -> Result<()> {
+fn cmd_ls(state: Option<&str>, limit: usize, db_path: &Path) -> Result<()> {
     let graph = open_graph(db_path)?;
     let all = graph.all()?;
     debug!("ls: total={} state={:?} limit={}", all.len(), state, limit);
@@ -534,7 +532,7 @@ fn cmd_ls(state: Option<&str>, limit: usize, db_path: &PathBuf) -> Result<()> {
     }
 
     let col = 10;
-    println!("{:<col$}  {}", "LIFECYCLE", "PATH");
+    println!("{:<col$}  PATH", "LIFECYCLE");
     println!("{}", "-".repeat(72));
     for e in filtered {
         println!("{:<col$}  {}", e.lifecycle.as_str(), e.path);
@@ -542,8 +540,9 @@ fn cmd_ls(state: Option<&str>, limit: usize, db_path: &PathBuf) -> Result<()> {
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn cmd_find(
-    db_path: &PathBuf,
+    db_path: &Path,
     state: Option<String>,
     extension: Option<String>,
     created_after: Option<String>,
@@ -553,7 +552,7 @@ fn cmd_find(
     limit: usize,
 ) -> Result<()> {
     let graph = open_graph(db_path)?;
-    let filter = build_find_filter(
+    let filter = build_find_filter(FindFilterParams {
         state,
         extension,
         created_after,
@@ -561,8 +560,8 @@ fn cmd_find(
         modified_within_days,
         larger_than_mb,
         limit,
-        0,
-    )?;
+        offset: 0,
+    })?;
 
     let results = graph.find(&filter)?;
     if results.is_empty() {
@@ -585,7 +584,7 @@ fn cmd_find(
 }
 
 fn cmd_clean(
-    db_path: &PathBuf,
+    db_path: &Path,
     config: &OrgConfig,
     dry_run: bool,
     apply: bool,
@@ -628,7 +627,7 @@ fn cmd_clean(
             }
             println!("stale relations ({}):", stale.len());
             for (from, to, kind) in &stale {
-                println!("  {} --[{}]--> {}", from, kind, to);
+                println!("  {from} --[{kind}]--> {to}");
             }
         }
         println!();
@@ -648,8 +647,7 @@ fn cmd_clean(
     };
 
     println!(
-        "removed {} dead entities and {} stale relations",
-        dead_deleted, stale_deleted
+        "removed {dead_deleted} dead entities and {stale_deleted} stale relations"
     );
     Ok(())
 }
@@ -673,7 +671,7 @@ fn cmd_init(force: bool) -> Result<()> {
     Ok(())
 }
 
-fn cmd_stats(db_path: &PathBuf) -> Result<()> {
+fn cmd_stats(db_path: &Path) -> Result<()> {
     let graph = open_graph(db_path)?;
     let all = graph.all()?;
 
@@ -690,11 +688,12 @@ fn cmd_stats(db_path: &PathBuf) -> Result<()> {
     println!();
     println!("by lifecycle:");
     for (state, count) in &counts {
-        println!("  {:10}  {}", state, count);
+        println!("  {state:10}  {count}");
     }
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn cmd_search(
     query: &str,
     limit: Option<usize>,
@@ -706,35 +705,34 @@ fn cmd_search(
     modified_after: Option<String>,
     explain: bool,
     config: &OrgConfig,
-    db_path: &PathBuf,
+    db_path: &Path,
 ) -> Result<()> {
     let limit = limit.unwrap_or(config.search.default_limit);
     let mode = mode.unwrap_or_else(|| default_search_mode(config));
-    let metadata_filter = build_find_filter(
+    let metadata_filter = build_find_filter(FindFilterParams {
         state,
         extension,
         created_after,
         modified_after,
-        None,
-        None,
+        modified_within_days: None,
+        larger_than_mb: None,
         limit,
-        0,
-    )?;
+        offset: 0,
+    })?;
     info!(
-        "search: {:?} limit={} dir={:?} mode={:?} explain={}",
-        query, limit, dir, mode, explain
+        "search: {query:?} limit={limit} dir={dir:?} mode={mode:?} explain={explain}"
     );
-    let results = search_entities(
+    let results = search_entities(SearchParams {
         query,
         limit,
-        0,
+        offset: 0,
         dir,
         mode,
-        &metadata_filter,
+        metadata_filter: &metadata_filter,
         config,
         db_path,
         explain,
-    )?;
+    })?;
 
     if results.items.is_empty() {
         println!("(no results — run `organon index` first)");
@@ -765,13 +763,13 @@ fn cmd_search(
     Ok(())
 }
 
-fn cmd_index(watch: Option<u64>, db_path: &PathBuf, config: &OrgConfig) -> Result<()> {
+fn cmd_index(watch: Option<u64>, db_path: &Path, config: &OrgConfig) -> Result<()> {
     let mut args = vec!["-m", "ai.indexer"];
     let db_path_str = db_path.to_string_lossy().to_string();
     args.extend(["--db", &db_path_str]);
     let watch_str;
     if let Some(secs) = watch {
-        info!("index watch mode: {}s", secs);
+        info!("index watch mode: {secs}s");
         watch_str = secs.to_string();
         args.extend(["--watch", &watch_str]);
     }
@@ -781,7 +779,7 @@ fn cmd_index(watch: Option<u64>, db_path: &PathBuf, config: &OrgConfig) -> Resul
 fn cmd_summarize(
     path: &PathBuf,
     model: Option<String>,
-    db_path: &PathBuf,
+    db_path: &Path,
     config: &OrgConfig,
 ) -> Result<()> {
     let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.clone());
@@ -806,15 +804,15 @@ fn cmd_summarize(
 
     match summary {
         Some(summary) => {
-            println!("path:     {}", path_str);
-            println!("summary:  {}", summary);
+            println!("path:     {path_str}");
+            println!("summary:  {summary}");
             Ok(())
         }
-        None => bail!("summary unavailable for {}", path_str),
+        None => bail!("summary unavailable for {path_str}"),
     }
 }
 
-fn cmd_diff(path: Option<&Path>, json: bool, db_path: &PathBuf, config: &OrgConfig) -> Result<()> {
+fn cmd_diff(path: Option<&Path>, json: bool, db_path: &Path, config: &OrgConfig) -> Result<()> {
     let root = path.unwrap_or(Path::new("."));
     let canonical_root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
     let ignore_set = IgnoreSet::load(&canonical_root, &config.watch.ignore_segments);
@@ -832,18 +830,18 @@ fn cmd_diff(path: Option<&Path>, json: bool, db_path: &PathBuf, config: &OrgConf
     }
 
     for path in &diff.new {
-        println!("NEW {}", path);
+        println!("NEW {path}");
     }
     for path in &diff.deleted {
-        println!("DELETED {}", path);
+        println!("DELETED {path}");
     }
     for path in &diff.changed {
-        println!("CHANGED {}", path);
+        println!("CHANGED {path}");
     }
     Ok(())
 }
 
-fn cmd_export(db_path: &PathBuf, format: ExportFormat, output: Option<&Path>) -> Result<()> {
+fn cmd_export(db_path: &Path, format: ExportFormat, output: Option<&Path>) -> Result<()> {
     let graph = open_graph(db_path)?;
     let entities = graph.all()?;
     let relations = graph.all_relations()?;
@@ -993,14 +991,14 @@ fn export_graph_as_dot(entities: &[Entity], relations: &[(String, String, String
         out.push_str(&format!("  {:?};\n", entity.path));
     }
     for (from, to, kind) in relations {
-        out.push_str(&format!("  {:?} -> {:?} [label={:?}];\n", from, to, kind));
+        out.push_str(&format!("  {from:?} -> {to:?} [label={kind:?}];\n"));
     }
     out.push_str("}\n");
     out
 }
 
 fn cmd_mcp_with_config(sse: bool, config: &OrgConfig) -> Result<()> {
-    info!("starting MCP server (sse={})", sse);
+    info!("starting MCP server (sse={sse})");
     let _ = env_logger::try_init();
     let runtime = tokio::runtime::Runtime::new()?;
     if sse {
@@ -1013,17 +1011,17 @@ fn cmd_mcp_with_config(sse: bool, config: &OrgConfig) -> Result<()> {
 }
 
 fn cmd_api(
-    db_path: &PathBuf,
+    db_path: &Path,
     config: &OrgConfig,
     host: Option<String>,
     port: Option<u16>,
 ) -> Result<()> {
     let _ = env_logger::try_init();
     let runtime = tokio::runtime::Runtime::new()?;
-    runtime.block_on(api::serve(db_path.clone(), config.clone(), host, port))
+    runtime.block_on(api::serve(db_path.to_path_buf(), config.clone(), host, port))
 }
 
-fn cmd_archive(dry_run: bool, apply: bool, dir: Option<&Path>, db_path: &PathBuf) -> Result<()> {
+fn cmd_archive(dry_run: bool, apply: bool, dir: Option<&Path>, db_path: &Path) -> Result<()> {
     use organon_core::entity::LifecycleState;
 
     let graph = open_graph(db_path)?;
@@ -1088,14 +1086,13 @@ fn cmd_archive(dry_run: bool, apply: bool, dir: Option<&Path>, db_path: &PathBuf
     Ok(())
 }
 
-fn cmd_graph(path: &PathBuf, depth: u8, format: GraphFormat, db_path: &PathBuf) -> Result<()> {
+fn cmd_graph(path: &PathBuf, depth: u8, format: GraphFormat, db_path: &Path) -> Result<()> {
     let graph = open_graph(db_path)?;
     let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.clone());
     let path_str = canonical.to_string_lossy();
     let depth_clamped = depth.min(3);
     info!(
-        "graph: {} depth={} format={:?}",
-        path_str, depth_clamped, format
+        "graph: {path_str} depth={depth_clamped} format={format:?}"
     );
 
     let view = build_relation_graph(&graph, path_str.as_ref(), depth_clamped)?;
@@ -1266,7 +1263,7 @@ fn render_graph_text(view: &RelationGraphView) -> String {
 fn render_graph_dot(view: &RelationGraphView) -> String {
     let mut out = String::from("digraph organon {\n");
     for node in &view.nodes {
-        out.push_str(&format!("  {:?};\n", node));
+        out.push_str(&format!("  {node:?};\n"));
     }
     for edge in &view.edges {
         out.push_str(&format!(
@@ -1319,7 +1316,7 @@ fn escape_mermaid(value: &str) -> String {
     value.replace('"', "\\\"")
 }
 
-fn build_find_filter(
+struct FindFilterParams {
     state: Option<String>,
     extension: Option<String>,
     created_after: Option<String>,
@@ -1328,25 +1325,27 @@ fn build_find_filter(
     larger_than_mb: Option<u64>,
     limit: usize,
     offset: usize,
-) -> Result<FindFilter> {
+}
+
+fn build_find_filter(params: FindFilterParams) -> Result<FindFilter> {
     let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64;
-    let modified_after = match (modified_after, modified_within_days) {
+    let modified_after = match (params.modified_after, params.modified_within_days) {
         (Some(date), _) => Some(parse_date_to_timestamp(&date)?),
         (None, Some(days)) => Some(now - days * 86_400),
         (None, None) => None,
     };
 
     Ok(FindFilter {
-        state,
-        extension: extension.map(normalize_extension),
-        created_after: created_after
+        state: params.state,
+        extension: params.extension.map(normalize_extension),
+        created_after: params.created_after
             .as_deref()
             .map(parse_date_to_timestamp)
             .transpose()?,
         modified_after,
-        larger_than: larger_than_mb.map(|mb| mb * 1024 * 1024),
-        offset,
-        limit,
+        larger_than: params.larger_than_mb.map(|mb| mb * 1024 * 1024),
+        offset: params.offset,
+        limit: params.limit,
     })
 }
 
@@ -1412,16 +1411,16 @@ mod tests {
 
     #[test]
     fn build_find_filter_normalizes_extension_and_dates() {
-        let filter = build_find_filter(
-            Some("active".to_string()),
-            Some(".rs".to_string()),
-            Some("2026-01-01".to_string()),
-            Some("2026-02-01".to_string()),
-            None,
-            Some(2),
-            20,
-            5,
-        )
+        let filter = build_find_filter(FindFilterParams {
+            state: Some("active".to_string()),
+            extension: Some(".rs".to_string()),
+            created_after: Some("2026-01-01".to_string()),
+            modified_after: Some("2026-02-01".to_string()),
+            modified_within_days: None,
+            larger_than_mb: Some(2),
+            limit: 20,
+            offset: 5,
+        })
         .unwrap();
 
         assert_eq!(filter.state.as_deref(), Some("active"));

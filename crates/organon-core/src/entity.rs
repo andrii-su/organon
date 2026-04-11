@@ -53,7 +53,7 @@ impl Entity {
             .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
             .map(|d| d.as_secs() as i64)
             .unwrap_or_else(|| {
-                warn!("created_at unavailable for {}, using now", path);
+                warn!("created_at unavailable for {path}, using now");
                 now
             });
 
@@ -63,7 +63,7 @@ impl Entity {
             .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
             .map(|d| d.as_secs() as i64)
             .unwrap_or_else(|| {
-                warn!("modified_at unavailable for {}, using now", path);
+                warn!("modified_at unavailable for {path}, using now");
                 now
             });
 
@@ -73,7 +73,7 @@ impl Entity {
             .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
             .map(|d| d.as_secs() as i64)
             .unwrap_or_else(|| {
-                warn!("accessed_at unavailable for {}, using now", path);
+                warn!("accessed_at unavailable for {path}, using now");
                 now
             });
 
@@ -96,7 +96,7 @@ impl Entity {
         let content_hash = match hash_file(p) {
             Ok(h) => Some(h),
             Err(e) => {
-                warn!("hash failed for {}: {}", path, e);
+                warn!("hash failed for {path}: {e}");
                 None
             }
         };

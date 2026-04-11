@@ -239,10 +239,9 @@ impl McpService {
     pub fn from_config(config: OrgConfig) -> Self {
         Self::new(PathBuf::from(&config.indexer.db_path), config)
     }
+}
 
-    pub fn default() -> Self {
-        Self::from_config(OrgConfig::load())
-    }
+impl McpService {
 
     pub fn get_entity(&self, path: &str) -> Result<Option<Entity>> {
         self.open_graph()?.get_by_path(path)

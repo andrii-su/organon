@@ -17,7 +17,7 @@ pub fn human_bytes(b: u64) -> String {
     } else if b >= KB {
         format!("{:.1} KB", b as f64 / KB as f64)
     } else {
-        format!("{} B", b)
+        format!("{b} B")
     }
 }
 

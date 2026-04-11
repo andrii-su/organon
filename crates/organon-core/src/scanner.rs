@@ -28,7 +28,7 @@ pub fn scan(
     ignore_set: &IgnoreSet,
     use_git_timestamps: bool,
 ) -> Result<ScanStats> {
-    info!("scanning: {}", root);
+    info!("scanning: {root}");
 
     let paths: Vec<_> = WalkDir::new(root)
         .follow_links(false)
@@ -40,7 +40,7 @@ pub fn scan(
         .collect();
 
     let total = paths.len();
-    info!("found {} files, indexing...", total);
+    info!("found {total} files, indexing...");
 
     let indexed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let skipped = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -62,12 +62,12 @@ pub fn scan(
                     indexed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 }
                 Err(e) => {
-                    warn!("upsert error {}: {:?}", path_str, e);
+                    warn!("upsert error {path_str}: {e:?}");
                     errors.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 }
             },
             Err(e) => {
-                warn!("entity error {}: {:?}", path_str, e);
+                warn!("entity error {path_str}: {e:?}");
                 errors.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
         }
@@ -111,7 +111,7 @@ pub fn refresh_lifecycle(graph: Arc<Mutex<Graph>>, lc: &LifecycleConfig) -> Resu
         }
     }
 
-    info!("lifecycle refresh: {} entities updated", updated);
+    info!("lifecycle refresh: {updated} entities updated");
     Ok(updated)
 }
 
@@ -126,8 +126,8 @@ pub fn schedule_lifecycle_refresh(
         loop {
             std::thread::sleep(interval);
             match refresh_lifecycle(Arc::clone(&graph), &lc) {
-                Ok(n) => info!("scheduled lifecycle refresh: {} entities updated", n),
-                Err(e) => warn!("scheduled lifecycle refresh error: {:?}", e),
+                Ok(n) => info!("scheduled lifecycle refresh: {n} entities updated"),
+                Err(e) => warn!("scheduled lifecycle refresh error: {e:?}"),
             }
         }
     })

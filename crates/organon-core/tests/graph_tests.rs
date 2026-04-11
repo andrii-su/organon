@@ -93,7 +93,7 @@ fn all_returns_all_entities() {
 
     for i in 0..5 {
         graph
-            .upsert(&test_entity(&format!("/tmp/file_{}.rs", i)))
+            .upsert(&test_entity(&format!("/tmp/file_{i}.rs")))
             .unwrap();
     }
 

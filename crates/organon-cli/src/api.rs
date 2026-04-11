@@ -21,7 +21,7 @@ use tower_http::cors::{Any, CorsLayer};
 
 use crate::{
     python::python_run_with_env,
-    search::{default_search_mode, python_env, search_entities, SearchMode},
+    search::{default_search_mode, python_env, search_entities, SearchMode, SearchParams},
 };
 
 #[derive(Clone)]
@@ -183,7 +183,7 @@ pub async fn serve(
     let port = port.unwrap_or(config.server.port);
     let addr = format!("{host}:{port}");
     let listener = tokio::net::TcpListener::bind(&addr).await?;
-    log::info!("REST API listening on http://{}", addr);
+    log::info!("REST API listening on http://{addr}");
     axum::serve(listener, router(ApiState { db_path, config })).await?;
     Ok(())
 }
@@ -563,16 +563,16 @@ async fn list_entities(
     let result = tokio::task::spawn_blocking(
         move || -> Result<PaginatedResponse<organon_core::entity::Entity>> {
             let graph = open_graph(&db_path)?;
-            let filter = build_find_filter(
-                query.state,
-                query.extension.or(query.ext),
-                query.created_after,
-                query.modified_after,
-                query.modified_within_days,
-                query.larger_than_mb,
-                query.limit.unwrap_or(50),
-                query.offset.unwrap_or(0),
-            )?;
+            let filter = build_find_filter(FindFilterParams {
+                state: query.state,
+                extension: query.extension.or(query.ext),
+                created_after: query.created_after,
+                modified_after: query.modified_after,
+                modified_within_days: query.modified_within_days,
+                larger_than_mb: query.larger_than_mb,
+                limit: query.limit.unwrap_or(50),
+                offset: query.offset.unwrap_or(0),
+            })?;
             let total = graph.count_find(&filter)?;
             let items = graph.find(&filter)?;
             Ok(PaginatedResponse {
@@ -646,30 +646,30 @@ async fn search(
     let mode = query.mode.unwrap_or_else(|| default_search_mode(&config));
     let dir = query.dir;
     let q = query.q;
-    let metadata_filter = build_find_filter(
-        query.state,
-        query.extension.or(query.ext),
-        query.created_after,
-        query.modified_after,
-        None,
-        None,
+    let metadata_filter = build_find_filter(FindFilterParams {
+        state: query.state,
+        extension: query.extension.or(query.ext),
+        created_after: query.created_after,
+        modified_after: query.modified_after,
+        modified_within_days: None,
+        larger_than_mb: None,
         limit,
         offset,
-    )?;
+    })?;
 
     let explain = query.explain.unwrap_or(false);
     let result = tokio::task::spawn_blocking(move || {
-        search_entities(
-            &q,
+        search_entities(SearchParams {
+            query: &q,
             limit,
             offset,
-            dir.as_deref(),
+            dir: dir.as_deref(),
             mode,
-            &metadata_filter,
-            &config,
-            &db_path,
+            metadata_filter: &metadata_filter,
+            config: &config,
+            db_path: &db_path,
             explain,
-        )
+        })
     })
     .await
     .map_err(|e| ApiError::internal(anyhow!(e)))??;
@@ -794,7 +794,7 @@ fn open_graph(db_path: &Path) -> Result<Graph> {
     Graph::open(db_path.to_string_lossy().as_ref())
 }
 
-fn build_find_filter(
+struct FindFilterParams {
     state: Option<String>,
     extension: Option<String>,
     created_after: Option<String>,
@@ -803,27 +803,29 @@ fn build_find_filter(
     larger_than_mb: Option<u64>,
     limit: usize,
     offset: usize,
-) -> Result<FindFilter> {
+}
+
+fn build_find_filter(params: FindFilterParams) -> Result<FindFilter> {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)?
         .as_secs() as i64;
-    let modified_after = match (modified_after, modified_within_days) {
+    let modified_after = match (params.modified_after, params.modified_within_days) {
         (Some(date), _) => Some(parse_date_to_timestamp(&date)?),
         (None, Some(days)) => Some(now - days * 86_400),
         (None, None) => None,
     };
 
     Ok(FindFilter {
-        state,
-        extension: extension.map(normalize_extension),
-        created_after: created_after
+        state: params.state,
+        extension: params.extension.map(normalize_extension),
+        created_after: params.created_after
             .as_deref()
             .map(parse_date_to_timestamp)
             .transpose()?,
         modified_after,
-        larger_than: larger_than_mb.map(|mb| mb * 1024 * 1024),
-        offset,
-        limit,
+        larger_than: params.larger_than_mb.map(|mb| mb * 1024 * 1024),
+        offset: params.offset,
+        limit: params.limit,
     })
 }
 

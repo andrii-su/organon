@@ -46,7 +46,7 @@ pub fn python_bin() -> PathBuf {
 }
 
 pub fn python_run_with_env(args: &[&str], envs: &[(String, String)]) -> Result<String> {
-    debug!("python_run: {:?}", args);
+    debug!("python_run: {args:?}");
     let mut cmd = Command::new(python_bin());
     cmd.args(args);
     for (key, value) in envs {
@@ -64,7 +64,7 @@ pub fn python_run_with_env(args: &[&str], envs: &[(String, String)]) -> Result<S
 }
 
 pub fn python_exec_with_env(args: &[&str], envs: &[(String, String)]) -> Result<()> {
-    debug!("python_exec: {:?}", args);
+    debug!("python_exec: {args:?}");
     let mut cmd = Command::new(python_bin());
     cmd.args(args);
     for (key, value) in envs {
@@ -72,7 +72,7 @@ pub fn python_exec_with_env(args: &[&str], envs: &[(String, String)]) -> Result<
     }
     let status = cmd.status()?;
     if !status.success() {
-        bail!("python process exited with: {}", status);
+        bail!("python process exited with: {status}");
     }
     Ok(())
 }

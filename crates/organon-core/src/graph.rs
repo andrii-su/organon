@@ -36,7 +36,7 @@ pub struct FindFilter {
 
 impl Graph {
     pub fn open(db_path: &str) -> Result<Self> {
-        debug!("opening graph db: {}", db_path);
+        debug!("opening graph db: {db_path}");
         let conn = Connection::open(db_path)?;
         let graph = Self { conn };
         graph.migrate()?;
@@ -125,7 +125,7 @@ impl Graph {
     }
 
     pub fn get_by_path(&self, path: &str) -> Result<Option<Entity>> {
-        debug!("get_by_path: {}", path);
+        debug!("get_by_path: {path}");
         let mut stmt = self.conn.prepare(
             "SELECT id, path, name, extension, size_bytes, created_at, modified_at,
                     accessed_at, lifecycle, content_hash, summary, git_author
@@ -135,7 +135,7 @@ impl Graph {
         if let Some(row) = rows.next()? {
             Ok(Some(row_to_entity(row)?))
         } else {
-            debug!("get_by_path: not found — {}", path);
+            debug!("get_by_path: not found — {path}");
             Ok(None)
         }
     }
@@ -149,9 +149,9 @@ impl Graph {
             .conn
             .execute("DELETE FROM entities WHERE path = ?1", params![path])?;
         if n > 0 {
-            info!("deleted entity: {}", path);
+            info!("deleted entity: {path}");
         } else {
-            warn!("delete_by_path: no entity at {}", path);
+            warn!("delete_by_path: no entity at {path}");
         }
         Ok(())
     }
@@ -161,7 +161,7 @@ impl Graph {
             "SELECT id, path, name, extension, size_bytes, created_at, modified_at,
                     accessed_at, lifecycle, content_hash, summary, git_author FROM entities",
         )?;
-        let rows = stmt.query_map([], |row| row_to_entity(row))?;
+        let rows = stmt.query_map([], row_to_entity)?;
         let entities: rusqlite::Result<Vec<_>> = rows.collect();
         let entities = entities?;
         debug!("all: {} entities", entities.len());
@@ -182,9 +182,9 @@ impl Graph {
              FROM entities WHERE {} ORDER BY modified_at DESC LIMIT ? OFFSET ?",
             where_parts.join(" AND ")
         );
-        debug!("find: {}", sql);
+        debug!("find: {sql}");
         let mut stmt = self.conn.prepare(&sql)?;
-        let rows = stmt.query_map(params_from_iter(params.iter()), |row| row_to_entity(row))?;
+        let rows = stmt.query_map(params_from_iter(params.iter()), row_to_entity)?;
         let entities: rusqlite::Result<Vec<_>> = rows.collect();
         Ok(entities?)
     }
@@ -221,7 +221,7 @@ impl Graph {
                     accessed_at, lifecycle, content_hash, summary, git_author
              FROM entities WHERE lifecycle = 'dead'",
         )?;
-        let rows = stmt.query_map([], |row| row_to_entity(row))?;
+        let rows = stmt.query_map([], row_to_entity)?;
         let entities: rusqlite::Result<Vec<_>> = rows.collect();
         Ok(entities?)
     }
@@ -251,7 +251,7 @@ impl Graph {
                     accessed_at, lifecycle, content_hash, summary, git_author
              FROM entities WHERE content_hash = ?1",
         )?;
-        let rows = stmt.query_map(params![content_hash], |row| row_to_entity(row))?;
+        let rows = stmt.query_map(params![content_hash], row_to_entity)?;
         let entities: rusqlite::Result<Vec<_>> = rows.collect();
         Ok(entities?)
     }
@@ -265,18 +265,17 @@ impl Graph {
     /// Relationships are updated with INSERT-OR-IGNORE + DELETE to handle
     /// duplicate-path edge cases without violating the PRIMARY KEY constraint.
     pub fn rename_entity(&self, old_path: &str, new_path: &str) -> Result<RenameOutcome> {
-        debug!("rename_entity: {} → {}", old_path, new_path);
+        debug!("rename_entity: {old_path} → {new_path}");
 
         if self.get_by_path(old_path)?.is_none() {
-            warn!("rename_entity: old path not found: {}", old_path);
+            warn!("rename_entity: old path not found: {old_path}");
             return Ok(RenameOutcome::OldNotFound);
         }
 
         // ── handle conflict at new_path ───────────────────────────────────────
         let conflict_resolved = if self.get_by_path(new_path)?.is_some() {
             info!(
-                "rename_entity: new_path exists (overwritten by OS rename), removing: {}",
-                new_path
+                "rename_entity: new_path exists (overwritten by OS rename), removing: {new_path}"
             );
             self.conn.execute(
                 "DELETE FROM relationships WHERE from_path = ?1 OR to_path = ?1",
@@ -337,7 +336,7 @@ impl Graph {
             params![old_path],
         )?;
 
-        info!("renamed entity: {} → {}", old_path, new_path);
+        info!("renamed entity: {old_path} → {new_path}");
 
         if conflict_resolved {
             Ok(RenameOutcome::ConflictResolved)
@@ -351,7 +350,7 @@ impl Graph {
     pub fn upsert_relation(&self, from_path: &str, to_path: &str, kind: &str) -> Result<()> {
         use std::time::{SystemTime, UNIX_EPOCH};
         let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64;
-        debug!("upsert_relation: {} --[{}]--> {}", from_path, kind, to_path);
+        debug!("upsert_relation: {from_path} --[{kind}]--> {to_path}");
         self.conn.execute(
             "INSERT INTO relationships (from_path, to_path, kind, created_at)
              VALUES (?1, ?2, ?3, ?4)
@@ -362,7 +361,7 @@ impl Graph {
     }
 
     pub fn get_relations(&self, path: &str) -> Result<Vec<(String, String, String)>> {
-        debug!("get_relations: {}", path);
+        debug!("get_relations: {path}");
         let mut stmt = self.conn.prepare(
             "SELECT from_path, to_path, kind FROM relationships
              WHERE from_path = ?1 OR to_path = ?1",
@@ -400,8 +399,7 @@ impl Graph {
             params![from_path],
         )?;
         debug!(
-            "delete_relations_from: {} edges removed for {}",
-            n, from_path
+            "delete_relations_from: {n} edges removed for {from_path}"
         );
         Ok(n)
     }
@@ -432,7 +430,7 @@ impl Graph {
                 OR NOT EXISTS (SELECT 1 FROM entities e WHERE e.path = relationships.to_path)",
             [],
         )?;
-        info!("cleaned {} stale relations", n);
+        info!("cleaned {n} stale relations");
         Ok(n)
     }
 
@@ -508,7 +506,7 @@ fn lifecycle_from_str(s: &str) -> LifecycleState {
         "archived" => LifecycleState::Archived,
         "dead" => LifecycleState::Dead,
         other => {
-            warn!("unknown lifecycle value '{}', defaulting to Born", other);
+            warn!("unknown lifecycle value '{other}', defaulting to Born");
             LifecycleState::Born
         }
     }

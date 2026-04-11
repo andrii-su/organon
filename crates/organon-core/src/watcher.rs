@@ -118,8 +118,8 @@ impl RenameTracker {
 
         for (hash, path) in &to_delete {
             match graph.lock().unwrap().delete_by_path(path) {
-                Ok(_) => info!("removed entity (expired rename window): {}", path),
-                Err(e) => warn!("delete error {}: {:?}", path, e),
+                Ok(_) => info!("removed entity (expired rename window): {path}"),
+                Err(e) => warn!("delete error {path}: {e:?}"),
             }
             if let Some(entries) = self.pending.get_mut(hash) {
                 entries.retain(|e| e.path != *path);
@@ -159,7 +159,7 @@ pub fn watch_many(
                 tracker.flush_expired(&graph);
                 handle_event(ev, roots, &graph, use_git_timestamps, &mut tracker);
             }
-            Ok(Err(e)) => warn!("watch error: {:?}", e),
+            Ok(Err(e)) => warn!("watch error: {e:?}"),
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
                 tracker.flush_expired(&graph);
             }
@@ -253,7 +253,7 @@ fn handle_event(
                 if path.is_file() && !is_ignored_for_roots(roots, path) {
                     let path_str = path.to_string_lossy();
                     if let Err(e) = graph.lock().unwrap().touch_accessed(&path_str, now) {
-                        warn!("touch_accessed error {}: {:?}", path_str, e);
+                        warn!("touch_accessed error {path_str}: {e:?}");
                     }
                 }
             }
@@ -278,14 +278,14 @@ fn buffer_remove(path: &Path, graph: &Arc<Mutex<Graph>>, tracker: &mut RenameTra
 
     match hash_opt {
         Some(hash) => {
-            info!("buffering remove for rename detection: {}", path_str);
+            info!("buffering remove for rename detection: {path_str}");
             tracker.push(path_str, hash);
         }
         None => {
             // No hash or entity unknown — delete immediately
             match graph.lock().unwrap().delete_by_path(&path_str) {
-                Ok(_) => info!("removed entity: {}", path_str),
-                Err(e) => warn!("delete error {}: {:?}", path_str, e),
+                Ok(_) => info!("removed entity: {path_str}"),
+                Err(e) => warn!("delete error {path_str}: {e:?}"),
             }
         }
     }
@@ -305,7 +305,7 @@ fn handle_create(
     let entity = match Entity::from_path_with_options(&path_str, use_git_timestamps) {
         Ok(e) => e,
         Err(e) => {
-            warn!("entity from_path error {}: {:?}", path_str, e);
+            warn!("entity from_path error {path_str}: {e:?}");
             return;
         }
     };
@@ -313,22 +313,21 @@ fn handle_create(
     // Try rename match
     if let Some(ref hash) = entity.content_hash {
         if let Some(old_path) = tracker.try_match(&path_str, hash) {
-            info!("detected rename: {} → {}", old_path, path_str);
+            info!("detected rename: {old_path} → {path_str}");
             match graph.lock().unwrap().rename_entity(&old_path, &path_str) {
                 Ok(outcome) => {
                     info!(
-                        "rename applied ({:?}): {} → {}",
-                        outcome, old_path, path_str
+                        "rename applied ({outcome:?}): {old_path} → {path_str}"
                     );
                     // Also update mtime/size via upsert to reflect any metadata change.
                     // The id / summary / lifecycle are preserved by rename_entity.
                     if let Err(e) = graph.lock().unwrap().upsert(&entity) {
-                        warn!("post-rename upsert error {}: {:?}", path_str, e);
+                        warn!("post-rename upsert error {path_str}: {e:?}");
                     }
                     return;
                 }
                 Err(e) => {
-                    warn!("rename_entity error {} → {}: {:?}", old_path, path_str, e);
+                    warn!("rename_entity error {old_path} → {path_str}: {e:?}");
                     // Fall through to normal upsert
                 }
             }
@@ -355,7 +354,7 @@ fn do_rename(old: &Path, new: &Path, graph: &Arc<Mutex<Graph>>, use_git_timestam
             if new.is_file() {
                 if let Ok(entity) = Entity::from_path_with_options(&new_str, use_git_timestamps) {
                     if let Err(e) = graph.lock().unwrap().upsert(&entity) {
-                        warn!("post-rename upsert error {}: {:?}", new_str, e);
+                        warn!("post-rename upsert error {new_str}: {e:?}");
                     }
                 }
             }
@@ -372,8 +371,8 @@ fn do_rename(old: &Path, new: &Path, graph: &Arc<Mutex<Graph>>, use_git_timestam
 fn upsert_entity(entity: Entity, graph: &Arc<Mutex<Graph>>) {
     let path = entity.path.clone();
     match graph.lock().unwrap().upsert(&entity) {
-        Ok(_) => info!("upserted entity: {}", path),
-        Err(e) => warn!("upsert error {}: {:?}", path, e),
+        Ok(_) => info!("upserted entity: {path}"),
+        Err(e) => warn!("upsert error {path}: {e:?}"),
     }
 }
 

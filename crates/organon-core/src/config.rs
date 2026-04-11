@@ -85,8 +85,8 @@ impl Default for IndexerConfig {
     fn default() -> Self {
         let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
         Self {
-            db_path: format!("{}/.organon/entities.db", home),
-            vectors_path: format!("{}/.organon/vectors", home),
+            db_path: format!("{home}/.organon/entities.db"),
+            vectors_path: format!("{home}/.organon/vectors"),
             embed_model: "BAAI/bge-small-en-v1.5".to_string(),
             max_file_size_mb: 100,
             summarize: false,
@@ -145,7 +145,7 @@ impl OrgConfig {
             .map(PathBuf::from)
             .unwrap_or_else(|_| {
                 let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-                PathBuf::from(format!("{}/.organon/config.toml", home))
+                PathBuf::from(format!("{home}/.organon/config.toml"))
             });
         Self::load_from(&path).unwrap_or_else(|_| {
             debug!("config file not found or parse error, using defaults");

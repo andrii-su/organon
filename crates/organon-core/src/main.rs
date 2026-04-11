@@ -34,9 +34,7 @@ fn main() -> Result<()> {
         .collect::<Vec<_>>()
         .join(", ");
     log::info!(
-        "organon-core started. db={} watch=[{}]",
-        db_path,
-        joined_roots
+        "organon-core started. db={db_path} watch=[{joined_roots}]"
     );
 
     // Phase 1a: index existing files
