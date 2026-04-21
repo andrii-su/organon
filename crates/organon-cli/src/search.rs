@@ -455,8 +455,7 @@ pub fn search_by_example(
             .to_string()
     });
 
-    let canonical = std::fs::canonicalize(like_path)
-        .unwrap_or_else(|_| PathBuf::from(like_path));
+    let canonical = std::fs::canonicalize(like_path).unwrap_or_else(|_| PathBuf::from(like_path));
     let path_str = canonical.to_string_lossy().to_string();
 
     let output = python_run_with_env(

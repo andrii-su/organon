@@ -267,10 +267,9 @@ impl Graph {
                 })?;
             }
             Some(prev) => {
-                let lifecycle_changed =
-                    prev.lifecycle.as_str() != entity.lifecycle.as_str();
-                let hash_changed = entity.content_hash.is_some()
-                    && prev.content_hash != entity.content_hash;
+                let lifecycle_changed = prev.lifecycle.as_str() != entity.lifecycle.as_str();
+                let hash_changed =
+                    entity.content_hash.is_some() && prev.content_hash != entity.content_hash;
 
                 if lifecycle_changed {
                     self.record_history(&HistoryEntry {
@@ -714,9 +713,9 @@ impl Graph {
             if current_depth >= depth {
                 continue;
             }
-            let mut stmt = self.conn.prepare(
-                "SELECT from_path, kind FROM relationships WHERE to_path = ?1",
-            )?;
+            let mut stmt = self
+                .conn
+                .prepare("SELECT from_path, kind FROM relationships WHERE to_path = ?1")?;
             let deps: Vec<(String, String)> = stmt
                 .query_map(params![current], |row| {
                     Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
@@ -1063,14 +1062,20 @@ mod tests {
 
         // Confirm history exists under old path.
         let before = g.get_history("/old.rs", 50).unwrap();
-        assert!(!before.is_empty(), "upsert should record at least one history entry");
+        assert!(
+            !before.is_empty(),
+            "upsert should record at least one history entry"
+        );
 
         // Rename.
         g.rename_entity("/old.rs", "/new.rs").unwrap();
 
         // History under old path should be empty.
         let old_hist = g.get_history("/old.rs", 50).unwrap();
-        assert!(old_hist.is_empty(), "old path should have no history after rename");
+        assert!(
+            old_hist.is_empty(),
+            "old path should have no history after rename"
+        );
 
         // History under new path should include pre-rename entries + the rename event.
         let new_hist = g.get_history("/new.rs", 50).unwrap();
@@ -1082,7 +1087,10 @@ mod tests {
 
         // The most recent entry should be the rename event.
         let rename_entry = new_hist.iter().find(|e| e.event == "renamed");
-        assert!(rename_entry.is_some(), "rename event should appear in history");
+        assert!(
+            rename_entry.is_some(),
+            "rename event should appear in history"
+        );
         assert_eq!(
             rename_entry.unwrap().old_path.as_deref(),
             Some("/old.rs"),

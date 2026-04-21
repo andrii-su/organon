@@ -389,7 +389,14 @@ fn main() -> Result<()> {
             index_interval,
             no_index,
             detect_renames,
-        } => cmd_watch(path, &db_path, &config, index_interval, no_index, detect_renames),
+        } => cmd_watch(
+            path,
+            &db_path,
+            &config,
+            index_interval,
+            no_index,
+            detect_renames,
+        ),
         Cmd::Status { path } => cmd_status(path, &db_path),
         Cmd::Ls { state, limit } => cmd_ls(state.as_deref(), limit, &db_path),
         Cmd::Find {
@@ -451,9 +458,7 @@ fn main() -> Result<()> {
                 &config,
                 &db_path,
             ),
-            (None, Some(path)) => {
-                cmd_search_like(&path, limit, dir.as_deref(), &config, &db_path)
-            }
+            (None, Some(path)) => cmd_search_like(&path, limit, dir.as_deref(), &config, &db_path),
             (None, None) => {
                 anyhow::bail!("provide a search query or --like <path>")
             }
@@ -882,7 +887,11 @@ fn cmd_search(
     } else {
         pq.free_text.clone()
     };
-    let effective_query = if effective_query.is_empty() { query } else { &effective_query };
+    let effective_query = if effective_query.is_empty() {
+        query
+    } else {
+        &effective_query
+    };
 
     // Merge field-filter overrides (explicit flags win over parsed tokens)
     let merged_state = state.or(pq.state);
@@ -1808,12 +1817,22 @@ fn cmd_doctor(db_path: &Path, config: &OrgConfig) -> Result<()> {
         "config",
         cfg_path.exists(),
         &cfg_path.display().to_string(),
-        if cfg_path.exists() { "" } else { "not found (defaults used)" },
+        if cfg_path.exists() {
+            ""
+        } else {
+            "not found (defaults used)"
+        },
     );
 
     // ── db ────────────────────────────────────────────────────────────────────
     if !db_path.exists() {
-        doctor_fail("db", &format!("{} — not found; run `organon watch .` first", db_path.display()));
+        doctor_fail(
+            "db",
+            &format!(
+                "{} — not found; run `organon watch .` first",
+                db_path.display()
+            ),
+        );
         doctor_skip("schema", "db not found");
         doctor_skip("vectors", "skip");
     } else {
@@ -1825,15 +1844,35 @@ fn cmd_doctor(db_path: &Path, config: &OrgConfig) -> Result<()> {
             Ok(graph) => {
                 let entities = graph.entity_count().unwrap_or(0);
                 let relations = graph.relation_count().unwrap_or(0);
-                doctor_ok("db", &format!("{} ({entities} entities, {relations} relations)", db_path.display()));
+                doctor_ok(
+                    "db",
+                    &format!(
+                        "{} ({entities} entities, {relations} relations)",
+                        db_path.display()
+                    ),
+                );
 
                 let tables = graph.table_names().unwrap_or_default();
-                let required = ["entities", "entity_history", "relationships", "entities_fts"];
-                let missing: Vec<_> = required.iter().filter(|t| !tables.iter().any(|n| n == **t)).collect();
+                let required = [
+                    "entities",
+                    "entity_history",
+                    "relationships",
+                    "entities_fts",
+                ];
+                let missing: Vec<_> = required
+                    .iter()
+                    .filter(|t| !tables.iter().any(|n| n == **t))
+                    .collect();
                 if missing.is_empty() {
                     doctor_ok("schema", &tables.join(", "));
                 } else {
-                    doctor_fail("schema", &format!("missing: {}", missing.iter().map(|t| **t).collect::<Vec<_>>().join(", ")));
+                    doctor_fail(
+                        "schema",
+                        &format!(
+                            "missing: {}",
+                            missing.iter().map(|t| **t).collect::<Vec<_>>().join(", ")
+                        ),
+                    );
                 }
             }
         }
@@ -1843,7 +1882,13 @@ fn cmd_doctor(db_path: &Path, config: &OrgConfig) -> Result<()> {
         if vectors_path.exists() {
             doctor_ok("vectors", &config.indexer.vectors_path);
         } else {
-            doctor_warn("vectors", &format!("{} (not found; run `organon index`)", config.indexer.vectors_path));
+            doctor_warn(
+                "vectors",
+                &format!(
+                    "{} (not found; run `organon index`)",
+                    config.indexer.vectors_path
+                ),
+            );
         }
     }
 
@@ -1887,7 +1932,10 @@ fn cmd_doctor(db_path: &Path, config: &OrgConfig) -> Result<()> {
     if ollama_up {
         doctor_ok("ollama", "reachable at localhost:11434");
     } else {
-        doctor_skip("ollama", "not reachable at localhost:11434 (optional; used for summaries)");
+        doctor_skip(
+            "ollama",
+            "not reachable at localhost:11434 (optional; used for summaries)",
+        );
     }
 
     Ok(())
@@ -2304,7 +2352,10 @@ mod tests {
         // Point at nonexistent DB — doctor should report issues but not panic/err.
         let missing = std::path::Path::new("/tmp/organon_test_missing_db_never_exists.db");
         let result = cmd_doctor(missing, &config);
-        assert!(result.is_ok(), "doctor should return Ok even with degraded state");
+        assert!(
+            result.is_ok(),
+            "doctor should return Ok even with degraded state"
+        );
     }
 
     // ── impact risk level ─────────────────────────────────────────────────────

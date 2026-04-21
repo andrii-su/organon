@@ -22,8 +22,7 @@ use rmcp::{
     transport::{
         stdio,
         streamable_http_server::{
-            session::local::LocalSessionManager, StreamableHttpServerConfig,
-            StreamableHttpService,
+            session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
         },
     },
     ErrorData as McpError, Json, RoleServer, ServerHandler, ServiceExt,
@@ -412,7 +411,8 @@ impl McpService {
             1..=3 => "low",
             4..=10 => "medium",
             _ => "high",
-        }.to_string();
+        }
+        .to_string();
         let entries_json = entries
             .into_iter()
             .map(|e| serde_json::to_value(e).unwrap_or(serde_json::Value::Null))
@@ -430,7 +430,10 @@ impl McpService {
     pub fn list_saved_queries(&self) -> Result<ListSavedQueriesResponse> {
         let path = self.saved_queries_path();
         if !path.exists() {
-            return Ok(ListSavedQueriesResponse { queries: vec![], total: 0 });
+            return Ok(ListSavedQueriesResponse {
+                queries: vec![],
+                total: 0,
+            });
         }
         let text = std::fs::read_to_string(&path)?;
         let store: serde_json::Value = serde_json::from_str(&text)?;
@@ -469,7 +472,10 @@ impl McpService {
         match kind {
             "find" => {
                 let state = sq.get("state").and_then(|v| v.as_str()).map(str::to_string);
-                let extension = sq.get("extension").and_then(|v| v.as_str()).map(str::to_string);
+                let extension = sq
+                    .get("extension")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string);
                 let filter = build_find_filter(state, extension, None, None, limit)?;
                 let graph = self.open_graph()?;
                 let items: Vec<serde_json::Value> = graph
@@ -478,10 +484,18 @@ impl McpService {
                     .filter_map(|e| serde_json::to_value(e).ok())
                     .collect();
                 let total = items.len();
-                Ok(RunSavedQueryResponse { kind: "find".to_string(), items, total })
+                Ok(RunSavedQueryResponse {
+                    kind: "find".to_string(),
+                    items,
+                    total,
+                })
             }
             "search" => {
-                let query_str = sq.get("query").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let query_str = sq
+                    .get("query")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
                 let mode_str = sq.get("mode").and_then(|v| v.as_str()).unwrap_or("vector");
                 let mode = match mode_str {
                     "fts" => SearchMode::Fts,
@@ -489,7 +503,10 @@ impl McpService {
                     _ => SearchMode::Vector,
                 };
                 let state = sq.get("state").and_then(|v| v.as_str()).map(str::to_string);
-                let extension = sq.get("extension").and_then(|v| v.as_str()).map(str::to_string);
+                let extension = sq
+                    .get("extension")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string);
                 let filter = build_find_filter(state, extension, None, None, limit)?;
                 let items: Vec<serde_json::Value> = self
                     .search_files(&query_str, limit, None, mode, &filter, false)?
@@ -497,7 +514,11 @@ impl McpService {
                     .filter_map(|h| serde_json::to_value(h).ok())
                     .collect();
                 let total = items.len();
-                Ok(RunSavedQueryResponse { kind: "search".to_string(), items, total })
+                Ok(RunSavedQueryResponse {
+                    kind: "search".to_string(),
+                    items,
+                    total,
+                })
             }
             other => bail!("unknown query kind '{other}'"),
         }
@@ -528,7 +549,10 @@ impl McpService {
         } else {
             None
         };
-        Ok(FindDuplicatesResponse { exact, near: near_pairs })
+        Ok(FindDuplicatesResponse {
+            exact,
+            near: near_pairs,
+        })
     }
 
     pub fn search_similar(
@@ -1054,7 +1078,11 @@ impl OrganonMcpServer {
         Parameters(req): Parameters<SearchSimilarRequest>,
     ) -> Result<Json<SearchFilesResponse>, String> {
         self.service
-            .search_similar(&req.path, req.limit.unwrap_or(10), req.path_prefix.as_deref())
+            .search_similar(
+                &req.path,
+                req.limit.unwrap_or(10),
+                req.path_prefix.as_deref(),
+            )
             .map(|items| Json(SearchFilesResponse { items }))
             .map_err(|e| e.to_string())
     }

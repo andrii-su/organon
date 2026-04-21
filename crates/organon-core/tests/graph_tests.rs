@@ -500,7 +500,10 @@ fn history_records_lifecycle_transition() {
     let lifecycle_events: Vec<_> = entries.iter().filter(|e| e.event == "lifecycle").collect();
     assert_eq!(lifecycle_events.len(), 1);
     assert_eq!(lifecycle_events[0].old_lifecycle.as_deref(), Some("active"));
-    assert_eq!(lifecycle_events[0].new_lifecycle.as_deref(), Some("dormant"));
+    assert_eq!(
+        lifecycle_events[0].new_lifecycle.as_deref(),
+        Some("dormant")
+    );
 }
 
 #[test]
@@ -537,7 +540,9 @@ fn history_records_rename() {
     let (graph, _f) = temp_graph();
     let entity = test_entity("/tmp/old_name.rs");
     graph.upsert(&entity).unwrap();
-    graph.rename_entity("/tmp/old_name.rs", "/tmp/new_name.rs").unwrap();
+    graph
+        .rename_entity("/tmp/old_name.rs", "/tmp/new_name.rs")
+        .unwrap();
 
     let entries = graph.get_history("/tmp/new_name.rs", 20).unwrap();
     let renamed: Vec<_> = entries.iter().filter(|e| e.event == "renamed").collect();

@@ -24,7 +24,10 @@ use axum::extract::Path as AxumPath;
 use crate::{
     python::python_run_with_env,
     queries,
-    search::{default_search_mode, parse_query_expr, python_env, search_entities, SearchMode, SearchParams},
+    search::{
+        default_search_mode, parse_query_expr, python_env, search_entities, SearchMode,
+        SearchParams,
+    },
 };
 
 #[derive(Clone)]
@@ -236,7 +239,10 @@ pub fn router(state: ApiState) -> Router {
         .route("/clean", post(clean))
         .route("/index", post(index))
         .route("/queries", get(list_queries))
-        .route("/queries/{name}", get(get_query).post(save_query).delete(delete_query))
+        .route(
+            "/queries/{name}",
+            get(get_query).post(save_query).delete(delete_query),
+        )
         .route("/queries/{name}/run", post(run_query))
         .layer(CorsLayer::new().allow_origin(Any).allow_methods(Any))
         .with_state(state)
@@ -997,7 +1003,11 @@ async fn search(
 
     let mode = query.mode.unwrap_or_else(|| default_search_mode(&config));
     let pq = parse_query_expr(&query.q);
-    let q = if pq.free_text.is_empty() { query.q } else { pq.free_text };
+    let q = if pq.free_text.is_empty() {
+        query.q
+    } else {
+        pq.free_text
+    };
     // Explicit query params take precedence over inline tokens
     let metadata_filter = build_find_filter(FindFilterParams {
         state: query.state.or(pq.state),
@@ -1154,14 +1164,18 @@ async fn list_queries() -> ApiResult<Json<serde_json::Value>> {
             v
         })
         .collect();
-    Ok(Json(serde_json::json!({ "queries": list, "total": list.len() })))
+    Ok(Json(
+        serde_json::json!({ "queries": list, "total": list.len() }),
+    ))
 }
 
 async fn get_query(AxumPath(name): AxumPath<String>) -> ApiResult<Json<serde_json::Value>> {
     let sq = tokio::task::spawn_blocking(move || queries::get(&name))
         .await
         .map_err(|e| ApiError::internal(anyhow!(e)))??;
-    Ok(Json(serde_json::to_value(sq).unwrap_or(serde_json::Value::Null)))
+    Ok(Json(
+        serde_json::to_value(sq).unwrap_or(serde_json::Value::Null),
+    ))
 }
 
 async fn save_query(
