@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
@@ -131,6 +132,86 @@ pub fn schedule_lifecycle_refresh(
             }
         }
     })
+}
+
+/// After a full scan, detect renames the file-watcher may have missed.
+///
+/// Matches entities present in the DB (within `root`) whose paths are no
+/// longer on disk against newly-scanned paths that share the same
+/// `content_hash`.  Only performs an unambiguous rename (exactly one
+/// on-disk candidate for a given hash that has no entity yet).
+///
+/// Should be called *after* `scan()` so the DB already holds fresh hashes.
+/// Returns the number of renames applied.
+pub fn reconcile_renames(root: &str, graph: Arc<Mutex<Graph>>) -> Result<usize> {
+    let root_prefix = std::fs::canonicalize(root)
+        .unwrap_or_else(|_| std::path::PathBuf::from(root))
+        .to_string_lossy()
+        .to_string();
+
+    let all = graph.lock().unwrap().all()?;
+
+    // Group on-disk entities by content_hash (hash → paths that exist on FS).
+    let mut hash_to_disk_paths: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for e in all.iter().filter(|e| e.path.starts_with(&root_prefix)) {
+        if std::path::Path::new(&e.path).exists() {
+            if let Some(h) = &e.content_hash {
+                hash_to_disk_paths
+                    .entry(h.clone())
+                    .or_default()
+                    .push(e.path.clone());
+            }
+        }
+    }
+
+    // Entities within root that are missing from disk and not already dead.
+    let missing: Vec<_> = all
+        .iter()
+        .filter(|e| e.path.starts_with(&root_prefix))
+        .filter(|e| !Path::new(&e.path).exists())
+        .filter(|e| !matches!(e.lifecycle, crate::entity::LifecycleState::Dead))
+        .filter(|e| e.content_hash.is_some())
+        .collect();
+
+    let mut renames = 0;
+    for entity in missing {
+        let hash = entity.content_hash.as_deref().unwrap();
+        let Some(disk_paths) = hash_to_disk_paths.get(hash) else {
+            continue;
+        };
+        // Only rename if the hash maps to exactly one on-disk path that
+        // differs from the entity's current (missing) path.
+        let candidates: Vec<_> = disk_paths
+            .iter()
+            .filter(|p| p.as_str() != entity.path)
+            .collect();
+        if candidates.len() != 1 {
+            continue; // ambiguous or none
+        }
+        let new_path = candidates[0];
+        // Skip if the target already has its own entity (would be a conflict).
+        if graph
+            .lock()
+            .unwrap()
+            .get_by_path(new_path)?
+            .map(|e| e.path != entity.path)
+            .unwrap_or(false)
+        {
+            continue;
+        }
+        match graph.lock().unwrap().rename_entity(&entity.path, new_path) {
+            Ok(_) => {
+                info!("scan: rename continuity {} → {}", entity.path, new_path);
+                renames += 1;
+            }
+            Err(e) => warn!("scan: rename continuity error: {e}"),
+        }
+    }
+
+    if renames > 0 {
+        info!("reconcile_renames: {renames} rename(s) applied");
+    }
+    Ok(renames)
 }
 
 /// Legacy convenience — uses default ignore logic (no .organonignore, no config extras).

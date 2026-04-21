@@ -367,6 +367,78 @@ fn apply_metadata_filter(
     Ok(filtered)
 }
 
+// ── query language parser ─────────────────────────────────────────────────────
+
+/// Result of parsing a mini query expression.
+/// Free text is passed to the search engine; field tokens become metadata filters.
+///
+/// Supported fields:
+/// - `state:<value>`           e.g. `state:dormant`
+/// - `ext:<value>`             e.g. `ext:rs` or `ext:.rs`
+/// - `extension:<value>`       alias for `ext:`
+/// - `modified><YYYY-MM-DD>`   e.g. `modified>2026-01-01`
+/// - `created><YYYY-MM-DD>`    e.g. `created>2026-01-01`
+/// - `size><N>`                e.g. `size>10` (MB)
+#[derive(Debug, Default, Clone)]
+pub struct ParsedQuery {
+    pub free_text: String,
+    pub state: Option<String>,
+    pub extension: Option<String>,
+    pub modified_after: Option<String>,
+    pub created_after: Option<String>,
+    pub larger_than_mb: Option<u64>,
+}
+
+impl ParsedQuery {
+    /// True when at least one metadata field was extracted.
+    pub fn has_filters(&self) -> bool {
+        self.state.is_some()
+            || self.extension.is_some()
+            || self.modified_after.is_some()
+            || self.created_after.is_some()
+            || self.larger_than_mb.is_some()
+    }
+}
+
+/// Parse a mini query expression into free text + metadata filters.
+/// Unknown `key:value` tokens are treated as free text.
+pub fn parse_query_expr(input: &str) -> ParsedQuery {
+    let mut free_words: Vec<&str> = Vec::new();
+    let mut state = None;
+    let mut extension = None;
+    let mut modified_after = None;
+    let mut created_after = None;
+    let mut larger_than_mb: Option<u64> = None;
+
+    for token in input.split_whitespace() {
+        if let Some(val) = token.strip_prefix("state:") {
+            state = Some(val.to_string());
+        } else if let Some(val) = token
+            .strip_prefix("ext:")
+            .or_else(|| token.strip_prefix("extension:"))
+        {
+            extension = Some(val.trim_start_matches('.').to_string());
+        } else if let Some(val) = token.strip_prefix("modified>") {
+            modified_after = Some(val.to_string());
+        } else if let Some(val) = token.strip_prefix("created>") {
+            created_after = Some(val.to_string());
+        } else if let Some(val) = token.strip_prefix("size>") {
+            larger_than_mb = val.parse().ok();
+        } else {
+            free_words.push(token);
+        }
+    }
+
+    ParsedQuery {
+        free_text: free_words.join(" "),
+        state,
+        extension,
+        modified_after,
+        created_after,
+        larger_than_mb,
+    }
+}
+
 /// Find files similar to `like_path` using its existing vector embedding.
 /// Returns a `SearchPage` compatible with the text-search path.
 pub fn search_by_example(
@@ -566,6 +638,57 @@ mod tests {
             .reasons
             .iter()
             .any(|r| r.contains("both vector and FTS")));
+    }
+
+    // ── parse_query_expr ──────────────────────────────────────────────────────
+
+    #[test]
+    fn parse_query_plain_text_passthrough() {
+        let pq = parse_query_expr("auth token validation");
+        assert_eq!(pq.free_text, "auth token validation");
+        assert!(!pq.has_filters());
+    }
+
+    #[test]
+    fn parse_query_state_filter() {
+        let pq = parse_query_expr("state:dormant stale notes");
+        assert_eq!(pq.state.as_deref(), Some("dormant"));
+        assert_eq!(pq.free_text, "stale notes");
+    }
+
+    #[test]
+    fn parse_query_ext_and_modified() {
+        let pq = parse_query_expr("ext:rs modified>2026-01-01 auth");
+        assert_eq!(pq.extension.as_deref(), Some("rs"));
+        assert_eq!(pq.modified_after.as_deref(), Some("2026-01-01"));
+        assert_eq!(pq.free_text, "auth");
+    }
+
+    #[test]
+    fn parse_query_dot_ext_stripped() {
+        let pq = parse_query_expr("ext:.py");
+        assert_eq!(pq.extension.as_deref(), Some("py"));
+    }
+
+    #[test]
+    fn parse_query_size_filter() {
+        let pq = parse_query_expr("size>5 big files");
+        assert_eq!(pq.larger_than_mb, Some(5));
+        assert_eq!(pq.free_text, "big files");
+    }
+
+    #[test]
+    fn parse_query_extension_alias() {
+        let pq = parse_query_expr("extension:toml config");
+        assert_eq!(pq.extension.as_deref(), Some("toml"));
+        assert_eq!(pq.free_text, "config");
+    }
+
+    #[test]
+    fn parse_query_unknown_key_is_free_text() {
+        let pq = parse_query_expr("foo:bar baz");
+        assert_eq!(pq.free_text, "foo:bar baz");
+        assert!(!pq.has_filters());
     }
 
     #[test]

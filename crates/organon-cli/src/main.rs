@@ -1,6 +1,7 @@
 mod api;
 mod format;
 mod python;
+mod queries;
 mod search;
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -25,7 +26,8 @@ use organon_core::{
 use format::{format_ts, human_bytes};
 use python::{python_exec_with_env, python_run_with_env};
 use search::{
-    default_search_mode, python_env, search_by_example, search_entities, SearchMode, SearchParams,
+    default_search_mode, parse_query_expr, python_env, search_by_example, search_entities,
+    SearchMode, SearchParams,
 };
 
 #[derive(Parser)]
@@ -75,6 +77,10 @@ enum Cmd {
         /// Disable auto-indexer
         #[arg(long)]
         no_index: bool,
+
+        /// After the initial scan, reconcile renames the watcher may have missed
+        #[arg(long)]
+        detect_renames: bool,
     },
 
     /// Show metadata and lifecycle state for a file
@@ -317,6 +323,57 @@ enum Cmd {
 
     /// Diagnose organon installation and runtime health
     Doctor,
+
+    /// Manage saved search/find queries
+    #[command(
+        after_long_help = "Examples:\n  organon query save stale-rs --state dormant --ext rs\n  organon query save auth-area --search \"auth token\" --mode hybrid\n  organon query list\n  organon query run stale-rs\n  organon query delete stale-rs"
+    )]
+    Query {
+        #[command(subcommand)]
+        action: QueryCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum QueryCmd {
+    /// Save a named query (find by default; use --search for semantic search)
+    Save {
+        /// Name for the saved query
+        name: String,
+        /// Search query text — saves as `organon search`; omit to save as `organon find`
+        #[arg(long, short = 'q')]
+        search: Option<String>,
+        /// Search mode (vector/fts/hybrid; search only)
+        #[arg(long, value_enum)]
+        mode: Option<SearchMode>,
+        #[arg(long)]
+        state: Option<String>,
+        #[arg(long, visible_alias = "ext")]
+        extension: Option<String>,
+        #[arg(long, value_name = "YYYY-MM-DD")]
+        created_after: Option<String>,
+        #[arg(long, value_name = "YYYY-MM-DD")]
+        modified_after: Option<String>,
+        #[arg(long)]
+        larger_than_mb: Option<u64>,
+        #[arg(long, default_value = "20")]
+        limit: usize,
+        #[arg(long, short)]
+        description: Option<String>,
+    },
+    /// List all saved queries
+    List,
+    /// Run a saved query
+    Run {
+        name: String,
+        /// Output raw JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Delete a saved query
+    Delete { name: String },
+    /// Show the definition of a saved query
+    Show { name: String },
 }
 
 fn main() -> Result<()> {
@@ -331,7 +388,8 @@ fn main() -> Result<()> {
             path,
             index_interval,
             no_index,
-        } => cmd_watch(path, &db_path, &config, index_interval, no_index),
+            detect_renames,
+        } => cmd_watch(path, &db_path, &config, index_interval, no_index, detect_renames),
         Cmd::Status { path } => cmd_status(path, &db_path),
         Cmd::Ls { state, limit } => cmd_ls(state.as_deref(), limit, &db_path),
         Cmd::Find {
@@ -425,6 +483,7 @@ fn main() -> Result<()> {
             json,
         } => cmd_duplicates(near, threshold, limit, json, &db_path, &config),
         Cmd::Doctor => cmd_doctor(&db_path, &config),
+        Cmd::Query { action } => cmd_query(action, &db_path, &config),
     }
 }
 
@@ -472,6 +531,7 @@ fn cmd_watch(
     config: &OrgConfig,
     index_interval: Option<u64>,
     no_index: bool,
+    detect_renames: bool,
 ) -> Result<()> {
     let roots = resolve_watch_roots(path.as_deref(), config)?;
     let watch_roots: Vec<_> = roots
@@ -523,6 +583,18 @@ fn cmd_watch(
         "indexed {} files ({} skipped, {} errors)",
         stats.indexed, stats.skipped, stats.errors
     );
+
+    if detect_renames {
+        for root in &watch_roots {
+            let root_str = root.path.to_string_lossy();
+            match scanner::reconcile_renames(&root_str, Arc::clone(&graph)) {
+                Ok(n) if n > 0 => eprintln!("reconciled {n} rename(s) in {root_str}"),
+                Ok(_) => {}
+                Err(e) => eprintln!("warning: rename reconciliation failed: {e}"),
+            }
+        }
+    }
+
     scanner::refresh_lifecycle(Arc::clone(&graph), &config.lifecycle)?;
 
     let _refresh_handle =
@@ -787,19 +859,45 @@ fn cmd_search(
     config: &OrgConfig,
     db_path: &Path,
 ) -> Result<()> {
+    // Parse inline field tokens out of the query (e.g. "state:dormant ext:rs auth")
+    let pq = parse_query_expr(query);
+    let effective_query = if pq.free_text.is_empty() && pq.has_filters() {
+        // All tokens were field filters — run as find
+        return cmd_find(
+            db_path,
+            pq.state.or(state),
+            pq.extension.or(extension),
+            created_after.or(pq.created_after),
+            modified_after.or(pq.modified_after),
+            None,
+            pq.larger_than_mb,
+            limit.unwrap_or(config.search.default_limit),
+        );
+    } else {
+        pq.free_text.clone()
+    };
+    let effective_query = if effective_query.is_empty() { query } else { &effective_query };
+
+    // Merge field-filter overrides (explicit flags win over parsed tokens)
+    let merged_state = state.or(pq.state);
+    let merged_ext = extension.or(pq.extension);
+    let merged_created = created_after.or(pq.created_after);
+    let merged_modified = modified_after.or(pq.modified_after);
+    let merged_size = pq.larger_than_mb;
+
     let limit = limit.unwrap_or(config.search.default_limit);
     let mode = mode.unwrap_or_else(|| default_search_mode(config));
     let metadata_filter = build_find_filter(FindFilterParams {
-        state,
-        extension,
-        created_after,
-        modified_after,
+        state: merged_state,
+        extension: merged_ext,
+        created_after: merged_created,
+        modified_after: merged_modified,
         modified_within_days: None,
-        larger_than_mb: None,
+        larger_than_mb: merged_size,
         limit,
         offset: 0,
     })?;
-    info!("search: {query:?} limit={limit} dir={dir:?} mode={mode:?} explain={explain}");
+    info!("search: {effective_query:?} limit={limit} dir={dir:?} mode={mode:?} explain={explain}");
     let results = search_entities(SearchParams {
         query,
         limit,
@@ -1790,6 +1888,171 @@ fn doctor_check(label: &str, ok: bool, _detail: &str, extra: &str) {
     } else {
         doctor_warn(label, extra);
     }
+}
+
+fn cmd_query(action: QueryCmd, db_path: &Path, config: &OrgConfig) -> Result<()> {
+    match action {
+        QueryCmd::Save {
+            name,
+            search,
+            mode,
+            state,
+            extension,
+            created_after,
+            modified_after,
+            larger_than_mb,
+            limit,
+            description,
+        } => {
+            let (kind, query, mode_str) = if let Some(q) = search {
+                (
+                    "search".to_string(),
+                    Some(q),
+                    mode.map(|m| format!("{m:?}").to_lowercase()),
+                )
+            } else {
+                ("find".to_string(), None, None)
+            };
+            let sq = queries::SavedQuery {
+                kind,
+                query,
+                mode: mode_str,
+                state,
+                extension,
+                created_after,
+                modified_after,
+                larger_than_mb,
+                limit,
+                description,
+                created_at: queries::now_ts(),
+            };
+            queries::insert(&name, sq)?;
+            println!("saved query '{name}'");
+        }
+
+        QueryCmd::List => {
+            let store = queries::load()?;
+            if store.is_empty() {
+                println!("(no saved queries — use `organon query save <name>`)");
+                return Ok(());
+            }
+            println!("{:<20}  {}", "NAME", "DEFINITION");
+            println!("{}", "-".repeat(72));
+            for (name, sq) in &store {
+                let desc = sq.description.as_deref().unwrap_or("");
+                let summary = sq.summary();
+                if desc.is_empty() {
+                    println!("{name:<20}  {summary}");
+                } else {
+                    println!("{name:<20}  {summary}  # {desc}");
+                }
+            }
+        }
+
+        QueryCmd::Show { name } => {
+            let sq = queries::get(&name)?;
+            println!("name:         {name}");
+            println!("kind:         {}", sq.kind);
+            if let Some(q) = &sq.query {
+                println!("query:        {q}");
+            }
+            if let Some(m) = &sq.mode {
+                println!("mode:         {m}");
+            }
+            if let Some(s) = &sq.state {
+                println!("state:        {s}");
+            }
+            if let Some(e) = &sq.extension {
+                println!("extension:    {e}");
+            }
+            if let Some(ca) = &sq.created_after {
+                println!("created_after:{ca}");
+            }
+            if let Some(ma) = &sq.modified_after {
+                println!("modified_after:{ma}");
+            }
+            if let Some(b) = sq.larger_than_mb {
+                println!("larger_than_mb:{b}");
+            }
+            println!("limit:        {}", sq.limit);
+            if let Some(d) = &sq.description {
+                println!("description:  {d}");
+            }
+            println!("created_at:   {}", format_ts(sq.created_at));
+        }
+
+        QueryCmd::Delete { name } => {
+            queries::remove(&name)?;
+            println!("deleted query '{name}'");
+        }
+
+        QueryCmd::Run { name, json } => {
+            let sq = queries::get(&name)?;
+            match sq.kind.as_str() {
+                "find" => cmd_find(
+                    db_path,
+                    sq.state,
+                    sq.extension,
+                    sq.created_after,
+                    sq.modified_after,
+                    None,
+                    sq.larger_than_mb,
+                    sq.limit,
+                )?,
+                "search" => {
+                    let query = sq.query.as_deref().unwrap_or("");
+                    let mode = sq.mode.as_deref().and_then(|m| match m {
+                        "vector" => Some(SearchMode::Vector),
+                        "fts" => Some(SearchMode::Fts),
+                        "hybrid" => Some(SearchMode::Hybrid),
+                        _ => None,
+                    });
+                    if json {
+                        // JSON output: run search and emit raw JSON
+                        let limit = sq.limit;
+                        let metadata_filter = build_find_filter(FindFilterParams {
+                            state: sq.state,
+                            extension: sq.extension,
+                            created_after: sq.created_after,
+                            modified_after: sq.modified_after,
+                            modified_within_days: None,
+                            larger_than_mb: sq.larger_than_mb,
+                            limit,
+                            offset: 0,
+                        })?;
+                        let results = search_entities(SearchParams {
+                            query,
+                            limit,
+                            offset: 0,
+                            dir: None,
+                            mode: mode.unwrap_or_else(|| default_search_mode(config)),
+                            metadata_filter: &metadata_filter,
+                            config,
+                            db_path,
+                            explain: false,
+                        })?;
+                        println!("{}", serde_json::to_string_pretty(&results.items)?);
+                    } else {
+                        cmd_search(
+                            query,
+                            Some(sq.limit),
+                            None,
+                            mode,
+                            sq.state,
+                            sq.extension,
+                            sq.created_after,
+                            sq.modified_after,
+                            false,
+                            config,
+                            db_path,
+                        )?;
+                    }
+                }
+                other => anyhow::bail!("unknown query kind '{other}'"),
+            }
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

@@ -16,6 +16,7 @@ import time
 from pathlib import Path
 
 from ai.common.ignore import is_ignored
+from ai.common.sensitive import is_sensitive, sensitive_reason
 from ai.embeddings.store import get_all_entries, get_indexed_hashes, index_file, update_path_in_store
 from ai.extractor.extract import extract_text
 from ai.relations.extract import extract_relations
@@ -186,12 +187,12 @@ def run_once(
     entities = get_entities(db_path)
     if not entities:
         logger.info("no entities in graph")
-        return {"total": 0, "indexed": 0, "skipped": 0, "errors": 0}
+        return {"total": 0, "indexed": 0, "skipped": 0, "errors": 0, "sensitive_skipped": 0}
 
     logger.info("indexing %d entities from graph", len(entities))
     indexed_hashes = get_indexed_hashes(db_path=vectors_db_path)
     fts_paths = get_fts_paths(db_path)
-    stats = {"total": len(entities), "indexed": 0, "skipped": 0, "errors": 0}
+    stats = {"total": len(entities), "indexed": 0, "skipped": 0, "errors": 0, "sensitive_skipped": 0}
 
     for entity in entities:
         path = entity["path"]
@@ -205,6 +206,12 @@ def run_once(
         if is_ignored(path):
             logger.debug("skipped (ignored path): %s", path)
             stats["skipped"] += 1
+            continue
+
+        if is_sensitive(path):
+            reason = sensitive_reason(path)
+            logger.info("skipped (sensitive): %s — %s", path, reason)
+            stats["sensitive_skipped"] += 1
             continue
 
         if not (needs_vector or needs_summary or needs_fts):
@@ -258,8 +265,9 @@ def run_once(
             logger.debug("relation extraction failed for %s: %s", path, e)
 
     logger.info(
-        "done: %d indexed, %d skipped, %d errors (total %d)",
-        stats["indexed"], stats["skipped"], stats["errors"], stats["total"],
+        "done: %d indexed, %d skipped, %d sensitive skipped, %d errors (total %d)",
+        stats["indexed"], stats["skipped"], stats["sensitive_skipped"],
+        stats["errors"], stats["total"],
     )
     return stats
 
