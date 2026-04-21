@@ -1,4 +1,5 @@
 """Local vector store using fastembed + lancedb."""
+
 import logging
 import os
 import time
@@ -26,6 +27,7 @@ def _get_model():
     if _model is None or _model_name != model_name:
         logger.info("loading embedding model: %s", model_name)
         from fastembed import TextEmbedding
+
         _model = TextEmbedding(model_name=model_name)
         _model_name = model_name
         logger.info("embedding model loaded")
@@ -47,13 +49,15 @@ def _get_table(db_path: str | None = None):
         return db.open_table(TABLE_NAME)
     except Exception:
         logger.info("creating lancedb table '%s' at %s", TABLE_NAME, path)
-        schema = pa.schema([
-            pa.field("path",         pa.utf8()),
-            pa.field("content_hash", pa.utf8()),
-            pa.field("text_preview", pa.utf8()),
-            pa.field("vector",       pa.list_(pa.float32(), EMBED_DIM)),
-            pa.field("indexed_at",   pa.int64()),
-        ])
+        schema = pa.schema(
+            [
+                pa.field("path", pa.utf8()),
+                pa.field("content_hash", pa.utf8()),
+                pa.field("text_preview", pa.utf8()),
+                pa.field("vector", pa.list_(pa.float32(), EMBED_DIM)),
+                pa.field("indexed_at", pa.int64()),
+            ]
+        )
         return db.create_table(TABLE_NAME, schema=schema)
 
 
@@ -69,9 +73,7 @@ def index_file(path: str, text: str, content_hash: str, db_path: str | None = No
 
     # Skip if already indexed with same hash
     try:
-        existing = table.search().where(
-            f"content_hash = '{content_hash}'"
-        ).limit(1).to_list()
+        existing = table.search().where(f"content_hash = '{content_hash}'").limit(1).to_list()
         if existing:
             logger.debug("index_file: already indexed [%s]: %s", content_hash[:8], path)
             return
@@ -88,13 +90,17 @@ def index_file(path: str, text: str, content_hash: str, db_path: str | None = No
     vector = embed_text(text)
     preview = text[:500].replace("\n", " ")
 
-    table.add([{
-        "path":         path,
-        "content_hash": content_hash,
-        "text_preview": preview,
-        "vector":       vector,
-        "indexed_at":   int(time.time()),
-    }])
+    table.add(
+        [
+            {
+                "path": path,
+                "content_hash": content_hash,
+                "text_preview": preview,
+                "vector": vector,
+                "indexed_at": int(time.time()),
+            }
+        ]
+    )
     logger.debug("index_file: indexed [%s]: %s", content_hash[:8], path)
 
 
@@ -128,8 +134,8 @@ def search(
 
     return [
         {
-            "path":         r["path"],
-            "score":        float(1 - r.get("_distance", 0)),
+            "path": r["path"],
+            "score": float(1 - r.get("_distance", 0)),
             "text_preview": r["text_preview"],
         }
         for r in results
@@ -224,12 +230,7 @@ def find_near_duplicates(
     table = _get_table(db_path)
 
     try:
-        all_rows = (
-            table.search()
-            .select(["path", "vector"])
-            .limit(10_000)
-            .to_list()
-        )
+        all_rows = table.search().select(["path", "vector"]).limit(10_000).to_list()
     except Exception as e:
         logger.warning("find_near_duplicates: failed to fetch rows: %s", e)
         return []

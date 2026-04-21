@@ -7,6 +7,7 @@ entities.db. Falls back to a safe default SELECT when generation fails.
 Environment:
     ORGANON_OLLAMA_MODEL  override model (default: llama3.2)
 """
+
 import logging
 import os
 import re
@@ -54,7 +55,7 @@ Rules:
 Question: {question}
 """
 
-_FENCE_RE  = re.compile(r"```(?:sql)?\s*(.*?)```", re.DOTALL | re.IGNORECASE)
+_FENCE_RE = re.compile(r"```(?:sql)?\s*(.*?)```", re.DOTALL | re.IGNORECASE)
 _SELECT_RE = re.compile(r"(SELECT\b.*)", re.DOTALL | re.IGNORECASE)
 
 _FORBIDDEN = re.compile(
@@ -69,6 +70,7 @@ _FALLBACK_SQL = (
 
 
 # ── validation + extraction ───────────────────────────────────────────────────
+
 
 def _validate_sql(sql: str) -> bool:
     """Return True iff sql is a safe SELECT-only statement."""
@@ -101,6 +103,7 @@ def _extract_sql(text: str) -> str | None:
 
 # ── ollama call ───────────────────────────────────────────────────────────────
 
+
 def generate_sql(nl_query: str) -> str | None:
     """Call ollama to generate SQL. Returns None on any failure."""
     try:
@@ -125,6 +128,7 @@ def generate_sql(nl_query: str) -> str | None:
 
 
 # ── main entry point ──────────────────────────────────────────────────────────
+
 
 def run_nl_query(nl_query: str, db_path=DB_PATH) -> dict:
     """

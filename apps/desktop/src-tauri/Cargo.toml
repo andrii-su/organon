@@ -1,0 +1,24 @@
+[package]
+name = "organon-desktop"
+version = "0.1.0"
+description = "Tauri desktop shell for Organon"
+authors = ["Organon"]
+edition = "2021"
+
+[workspace]
+
+[lib]
+name = "organon_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.0.0", features = [] }
+
+[dependencies]
+organon-cli = { path = "../../../crates/organon-cli" }
+organon-core = { path = "../../../crates/organon-core" }
+portpicker = "0.1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+tauri = { version = "2.0.0", features = [] }
+tokio = { version = "1", features = ["time"] }

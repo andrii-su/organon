@@ -5,6 +5,8 @@ __pycache__/
 *.db
 ~/.organon/
 .DS_Store
+node_modules/
+dist/
 
 artifacts/
 logs/

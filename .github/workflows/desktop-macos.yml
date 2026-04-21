@@ -1,0 +1,73 @@
+name: Desktop macOS
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/desktop-macos.yml"
+      - "apps/desktop/**"
+      - "crates/organon-cli/**"
+      - "crates/organon-core/**"
+      - "crates/organon-mcp/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "README.md"
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/desktop-macos.yml"
+      - "apps/desktop/**"
+      - "crates/organon-cli/**"
+      - "crates/organon-core/**"
+      - "crates/organon-mcp/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "README.md"
+  workflow_dispatch:
+
+jobs:
+  build-macos:
+    name: Build macOS desktop app
+    runs-on: macos-latest
+    defaults:
+      run:
+        shell: bash
+        working-directory: apps/desktop
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: apps/desktop/package-lock.json
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            apps/desktop/src-tauri -> target
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Run frontend tests
+        run: npm test
+
+      - name: Build macOS app bundle
+        run: npx tauri build --bundles app --no-sign
+
+      - name: Upload macOS app artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: organon-desktop-macos-app
+          path: |
+            apps/desktop/src-tauri/target/release/bundle/macos/*.app
+          if-no-files-found: error

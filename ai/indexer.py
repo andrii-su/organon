@@ -8,6 +8,7 @@ Usage:
     python -m ai.indexer               # run once
     python -m ai.indexer --watch 30    # run every 30s
 """
+
 import argparse
 import logging
 import os
@@ -17,7 +18,12 @@ from pathlib import Path
 
 from ai.common.ignore import is_ignored
 from ai.common.sensitive import is_sensitive, sensitive_reason
-from ai.embeddings.store import get_all_entries, get_indexed_hashes, index_file, update_path_in_store
+from ai.embeddings.store import (
+    get_all_entries,
+    get_indexed_hashes,
+    index_file,
+    update_path_in_store,
+)
 from ai.extractor.extract import extract_text
 from ai.relations.extract import extract_relations
 from ai.relations.store import delete_relations_from, upsert_relations
@@ -155,7 +161,9 @@ def reconcile_lancedb_paths(
             if update_path_in_store(ldb_path, new_path, db_path=vectors_db_path):
                 reconciled += 1
         elif len(candidates) == 0:
-            logger.debug("reconcile: no sqlite entity for lancedb entry %s — leaving stale", ldb_path)
+            logger.debug(
+                "reconcile: no sqlite entity for lancedb entry %s — leaving stale", ldb_path
+            )
         else:
             logger.debug(
                 "reconcile: ambiguous (%d candidates) for lancedb entry %s — skipping",
@@ -192,7 +200,13 @@ def run_once(
     logger.info("indexing %d entities from graph", len(entities))
     indexed_hashes = get_indexed_hashes(db_path=vectors_db_path)
     fts_paths = get_fts_paths(db_path)
-    stats = {"total": len(entities), "indexed": 0, "skipped": 0, "errors": 0, "sensitive_skipped": 0}
+    stats = {
+        "total": len(entities),
+        "indexed": 0,
+        "skipped": 0,
+        "errors": 0,
+        "sensitive_skipped": 0,
+    }
 
     for entity in entities:
         path = entity["path"]
@@ -266,8 +280,11 @@ def run_once(
 
     logger.info(
         "done: %d indexed, %d skipped, %d sensitive skipped, %d errors (total %d)",
-        stats["indexed"], stats["skipped"], stats["sensitive_skipped"],
-        stats["errors"], stats["total"],
+        stats["indexed"],
+        stats["skipped"],
+        stats["sensitive_skipped"],
+        stats["errors"],
+        stats["total"],
     )
     return stats
 
@@ -280,8 +297,9 @@ def main() -> None:
 
     parser = argparse.ArgumentParser(description="Organon indexer")
     parser.add_argument("--db", default=str(DEFAULT_DB), help="SQLite DB path")
-    parser.add_argument("--watch", type=int, metavar="SECONDS",
-                        help="Run continuously every N seconds")
+    parser.add_argument(
+        "--watch", type=int, metavar="SECONDS", help="Run continuously every N seconds"
+    )
     args = parser.parse_args()
 
     db_path = Path(args.db).expanduser()

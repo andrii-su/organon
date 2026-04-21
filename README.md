@@ -54,11 +54,22 @@ organon search "database schema" --state active --ext rs
 organon graph src/main.rs --depth 2 --format mermaid
 ```
 
+### 5. Run the desktop UI
+
+```bash
+cd apps/desktop
+npm install
+npm run tauri dev
+```
+
+The Tauri shell talks to the existing local REST API and auto-starts the same
+server in-process when no API is already running.
+
 ## 🔄 Lifecycle
 
 Every entity moves through a deterministic state machine:
 
-```
+```text
 born → active → dormant → archived → dead
 ```
 
@@ -94,11 +105,13 @@ Global flags: `--quiet` · `-v` (info) · `-vv` (debug)
 
 ## 🏗️ Architecture
 
-```
+```text
 crates/
   organon-core/   Rust: filesystem watcher, entity graph (SQLite), lifecycle engine
   organon-mcp/    Rust: MCP server exposing the graph to AI agents
   organon-cli/    Rust: CLI for querying and managing entities
+apps/
+  desktop/        Tauri + React shell over the existing REST API
 ai/
   extractor/      Python: content extraction (text, PDF, code, images)
   embeddings/     Python: local semantic vectors via fastembed + lancedb
@@ -115,7 +128,7 @@ ai/
 | Local LLM | `ollama` — summaries via any local model |
 | Agent protocol | MCP (Model Context Protocol) |
 | Storage | SQLite + LanceDB — 100% on-disk |
-| Future UI | Tauri — macOS menu bar app |
+| Desktop UI | Tauri + React — practical shell over the existing API |
 
 ## 🧪 Development
 
@@ -129,6 +142,27 @@ uv run --group dev ruff check ai
 # Python tests
 uv run --group dev pytest
 ```
+
+### Desktop UI
+
+```bash
+cd apps/desktop
+
+# install frontend + tauri dependencies
+npm install
+
+# dev mode
+npm run tauri dev
+
+# frontend tests
+npm test
+
+# production app build
+npm run tauri build
+```
+
+The desktop app currently ships `Search`, `Graph`, `History`, `Impact`, and
+`Duplicates` screens plus a shared entity detail panel.
 
 ## 🛣️ Roadmap
 

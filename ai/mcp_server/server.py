@@ -8,6 +8,7 @@ Run:
     uv run python -m ai.mcp_server.server       # stdio (for Claude Desktop)
     uv run python -m ai.mcp_server.server --sse  # SSE transport (for Cursor)
 """
+
 import logging
 import sqlite3
 import sys
@@ -34,6 +35,7 @@ mcp = FastMCP("organon")
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 
+
 def _db():
     conn = sqlite3.connect(str(DB_PATH))
     conn.row_factory = sqlite3.Row
@@ -45,6 +47,7 @@ def _row_to_dict(row) -> dict:
 
 
 # ── tools ─────────────────────────────────────────────────────────────────────
+
 
 @mcp.tool()
 def search_files(query: str, limit: int = 10, path_prefix: str | None = None) -> list[dict]:
@@ -73,9 +76,7 @@ def get_entity(path: str) -> dict | None:
     """
     logger.debug("get_entity: %s", path)
     with _db() as conn:
-        row = conn.execute(
-            "SELECT * FROM entities WHERE path = ?", (path,)
-        ).fetchone()
+        row = conn.execute("SELECT * FROM entities WHERE path = ?", (path,)).fetchone()
         if row is None:
             logger.debug("get_entity: not found: %s", path)
         return _row_to_dict(row) if row else None
@@ -162,9 +163,9 @@ def graph_stats() -> dict:
     logger.info("graph_stats: total=%d indexed=%d", total, indexed_count)
     return {
         "total_entities": total,
-        "by_lifecycle":   by_lifecycle,
+        "by_lifecycle": by_lifecycle,
         "vector_indexed": indexed_count,
-        "db_path":        str(DB_PATH),
+        "db_path": str(DB_PATH),
     }
 
 
@@ -197,7 +198,9 @@ def query_graph(nl_query: str) -> dict:
     """
     logger.info("query_graph: %r", nl_query)
     result = run_nl_query(nl_query, db_path=DB_PATH)
-    logger.debug("query_graph: mode=%s results=%d", result.get("mode"), len(result.get("results", [])))
+    logger.debug(
+        "query_graph: mode=%s results=%d", result.get("mode"), len(result.get("results", []))
+    )
     return result
 
 
@@ -254,11 +257,13 @@ def get_impact(path: str, depth: int = 5) -> dict:
                 from_path = row["from_path"]
                 if from_path not in visited:
                     visited.add(from_path)
-                    entries.append({
-                        "path": from_path,
-                        "kind": row["kind"],
-                        "depth": current_depth + 1,
-                    })
+                    entries.append(
+                        {
+                            "path": from_path,
+                            "kind": row["kind"],
+                            "depth": current_depth + 1,
+                        }
+                    )
                     queue.append((from_path, current_depth + 1))
 
     entries.sort(key=lambda e: (e["depth"], e["path"]))
@@ -290,10 +295,7 @@ def find_duplicates(
             "GROUP BY content_hash HAVING COUNT(*) > 1 "
             "ORDER BY COUNT(*) DESC"
         ).fetchall()
-        exact = [
-            {"content_hash": r["content_hash"], "paths": r["paths"].split("||")}
-            for r in rows
-        ]
+        exact = [{"content_hash": r["content_hash"], "paths": r["paths"].split("||")} for r in rows]
 
     near_pairs = None
     if near:
@@ -319,6 +321,7 @@ def search_similar(path: str, limit: int = 10, path_prefix: str | None = None) -
 
 # ── resources ─────────────────────────────────────────────────────────────────
 
+
 @mcp.resource("organon://entities")
 def entities_resource() -> str:
     """All entities in the graph as a summary list."""
@@ -340,6 +343,7 @@ def entity_resource(path: str) -> str:
 
 
 # ── entry point ───────────────────────────────────────────────────────────────
+
 
 def main() -> None:
     logging.basicConfig(

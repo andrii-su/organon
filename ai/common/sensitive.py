@@ -4,6 +4,7 @@ Patterns are checked against the filename and directory components.
 Extra patterns can be added via the ORGANON_SENSITIVE_EXTRA env var
 (colon-separated glob patterns, e.g. "vault.json:*.secret").
 """
+
 import fnmatch
 import os
 from pathlib import Path
@@ -20,12 +21,16 @@ DEFAULT_SENSITIVE_PATTERNS: tuple[str, ...] = (
     "*.keystore",
     "*.pkcs12",
     "*.cer",
-    "*.asc",        # GPG armored
-    "*.gpg",        # GPG binary
-    "id_rsa", "id_rsa.*",
-    "id_ed25519", "id_ed25519.*",
-    "id_ecdsa", "id_ecdsa.*",
-    "id_dsa", "id_dsa.*",
+    "*.asc",  # GPG armored
+    "*.gpg",  # GPG binary
+    "id_rsa",
+    "id_rsa.*",
+    "id_ed25519",
+    "id_ed25519.*",
+    "id_ecdsa",
+    "id_ecdsa.*",
+    "id_dsa",
+    "id_dsa.*",
     ".netrc",
     "credentials",
     "secrets.json",
@@ -43,13 +48,15 @@ DEFAULT_SENSITIVE_PATTERNS: tuple[str, ...] = (
 )
 
 # Directory components that indicate sensitive areas.
-SENSITIVE_DIRS: frozenset[str] = frozenset({
-    ".ssh",
-    ".gnupg",
-    ".aws",
-    ".config/gcloud",
-    "secrets",       # common convention
-})
+SENSITIVE_DIRS: frozenset[str] = frozenset(
+    {
+        ".ssh",
+        ".gnupg",
+        ".aws",
+        ".config/gcloud",
+        "secrets",  # common convention
+    }
+)
 
 
 def _extra_patterns() -> tuple[str, ...]:

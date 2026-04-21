@@ -76,9 +76,8 @@ ok "Built: $BINARY"
 # ── 4. Install binary to PATH ─────────────────────────────────────────────────
 step "Installing binary to $INSTALL_DIR"
 mkdir -p "$INSTALL_DIR"
-cp "$BINARY" "$INSTALL_DIR/organon"
-chmod +x "$INSTALL_DIR/organon"
-ok "Copied to $INSTALL_DIR/organon"
+ln -sfn "$BINARY" "$INSTALL_DIR/organon"
+ok "Symlinked to $INSTALL_DIR/organon"
 
 # ── 5. Wire up PATH in shell profile ─────────────────────────────────────────
 step "Configuring PATH"
@@ -146,6 +145,15 @@ else
     warn "Python AI layer check failed — run 'organon index' to diagnose"
 fi
 
+# Verify installed command still finds Python package outside repo root
+TMP_SMOKE_DIR="$(mktemp -d)"
+if (cd "$TMP_SMOKE_DIR" && organon doctor | grep -q '\[OK\]    lancedb'); then
+    ok "Installed CLI resolves Python env outside repo"
+else
+    warn "Installed CLI cannot resolve Python env outside repo — rerun setup.sh"
+fi
+rm -rf "$TMP_SMOKE_DIR"
+
 # ── 7. Data directory ─────────────────────────────────────────────────────────
 step "Preparing data directory"
 mkdir -p "$HOME/.organon/archive"
@@ -158,11 +166,11 @@ echo -e "${GREEN}${BOLD} Organon is ready!${RESET}"
 echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
 echo ""
 echo "  Quick start:"
-echo "    organon watch .              # index current directory"
-echo "    organon index                # embed files for semantic search"
+echo "    organon watch .               # index current directory"
+echo "    organon index                 # embed files for semantic search"
 echo "    organon search \"your query\" # semantic search"
-echo "    organon stats                # show graph stats"
-echo "    organon mcp                  # start MCP server for Claude"
+echo "    organon stats                 # show graph stats"
+echo "    organon mcp                   # start MCP server for Claude"
 echo ""
 if ! command -v ollama &>/dev/null; then
     echo -e "  ${YELLOW}Optional:${RESET} install ollama for NL queries"

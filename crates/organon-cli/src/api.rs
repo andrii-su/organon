@@ -22,6 +22,10 @@ use tower_http::cors::{Any, CorsLayer};
 use axum::extract::Path as AxumPath;
 
 use crate::{
+    graph_view::{
+        build_relation_graph, render_graph_dot, render_graph_mermaid, render_graph_text,
+        RelationGraphView,
+    },
     python::python_run_with_env,
     queries,
     search::{
@@ -122,6 +126,17 @@ struct ImpactQuery {
     depth: u8,
 }
 
+#[derive(Debug, Deserialize)]
+struct GraphQuery {
+    path: String,
+    #[serde(default = "default_graph_depth")]
+    depth: u8,
+}
+
+fn default_graph_depth() -> u8 {
+    2
+}
+
 fn default_impact_depth() -> u8 {
     5
 }
@@ -180,6 +195,17 @@ struct StatsResponse {
 }
 
 #[derive(Debug, Serialize)]
+struct GraphResponse {
+    path: String,
+    depth: u8,
+    #[serde(flatten)]
+    graph: RelationGraphView,
+    text: String,
+    dot: String,
+    mermaid: String,
+}
+
+#[derive(Debug, Serialize)]
 struct PaginatedResponse<T> {
     items: Vec<T>,
     total: usize,
@@ -234,6 +260,7 @@ pub fn router(state: ApiState) -> Router {
         .route("/history", get(get_history))
         .route("/impact", get(get_impact))
         .route("/duplicates", get(get_duplicates))
+        .route("/graph", get(get_graph))
         .route("/relations", get(get_relations))
         .route("/search", get(search))
         .route("/clean", post(clean))
@@ -373,6 +400,19 @@ async fn openapi_json() -> Json<Value> {
                     ],
                     "responses": {
                         "200": json_response("Impact report", ref_schema("ImpactResponse")),
+                        "500": error_response("Internal error")
+                    }
+                }
+            },
+            "/graph": {
+                "get": {
+                    "summary": "Build relation graph rooted at a path with cycle detection and renderings",
+                    "parameters": [
+                        query_param("path", "Absolute file path", true, json!({"type": "string"})),
+                        query_param("depth", "BFS depth (default 2, max 3)", false, json!({"type": "integer", "minimum": 1, "default": 2}))
+                    ],
+                    "responses": {
+                        "200": json_response("Relation graph", ref_schema("GraphResponse")),
                         "500": error_response("Internal error")
                     }
                 }
@@ -563,6 +603,35 @@ async fn openapi_json() -> Json<Value> {
                         "from": { "type": "string" },
                         "to": { "type": "string" },
                         "kind": { "type": "string" }
+                    }
+                },
+                "GraphEdge": {
+                    "type": "object",
+                    "required": ["from", "to", "kind"],
+                    "properties": {
+                        "from": { "type": "string" },
+                        "to": { "type": "string" },
+                        "kind": { "type": "string" }
+                    }
+                },
+                "GraphResponse": {
+                    "type": "object",
+                    "required": ["path", "depth", "nodes", "edges", "cycles", "text", "dot", "mermaid"],
+                    "properties": {
+                        "path": { "type": "string" },
+                        "depth": { "type": "integer", "minimum": 1 },
+                        "nodes": { "type": "array", "items": { "type": "string" } },
+                        "edges": { "type": "array", "items": ref_schema("GraphEdge") },
+                        "cycles": {
+                            "type": "array",
+                            "items": {
+                                "type": "array",
+                                "items": { "type": "string" }
+                            }
+                        },
+                        "text": { "type": "string" },
+                        "dot": { "type": "string" },
+                        "mermaid": { "type": "string" }
                     }
                 },
                 "SearchHit": {
@@ -903,6 +972,31 @@ async fn get_impact(
             path,
             depth,
             entries,
+        })
+    })
+    .await
+    .map_err(|e| ApiError::internal(anyhow!(e)))??;
+
+    Ok(Json(result))
+}
+
+async fn get_graph(
+    State(state): State<ApiState>,
+    Query(query): Query<GraphQuery>,
+) -> ApiResult<Json<GraphResponse>> {
+    let db_path = state.db_path.clone();
+    let path = query.path;
+    let depth = query.depth.min(3);
+    let result = tokio::task::spawn_blocking(move || -> Result<GraphResponse> {
+        let graph = open_graph(&db_path)?;
+        let view = build_relation_graph(&graph, &path, depth)?;
+        Ok(GraphResponse {
+            path,
+            depth,
+            text: render_graph_text(&view),
+            dot: render_graph_dot(&view),
+            mermaid: render_graph_mermaid(&view),
+            graph: view,
         })
     })
     .await
@@ -1512,5 +1606,44 @@ mod tests {
         assert_eq!(body["items"].as_array().unwrap().len(), 1);
         assert_eq!(body["total"], 3);
         assert_eq!(body["offset"], 1);
+    }
+
+    #[tokio::test]
+    async fn graph_route_returns_cycles_and_renderings() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let graph = Graph::open(tmp.path().to_string_lossy().as_ref()).unwrap();
+        graph.upsert(&test_entity("/tmp/a.rs")).unwrap();
+        graph.upsert(&test_entity("/tmp/b.rs")).unwrap();
+        graph
+            .upsert_relation("/tmp/a.rs", "/tmp/b.rs", "imports")
+            .unwrap();
+        graph
+            .upsert_relation("/tmp/b.rs", "/tmp/a.rs", "imports")
+            .unwrap();
+
+        let app = router(ApiState {
+            db_path: tmp.path().to_path_buf(),
+            config: OrgConfig::default(),
+        });
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/graph?path=/tmp/a.rs&depth=2")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["nodes"].as_array().unwrap().len(), 2);
+        assert_eq!(body["edges"].as_array().unwrap().len(), 2);
+        assert_eq!(body["cycles"].as_array().unwrap().len(), 1);
+        assert!(body["text"].as_str().unwrap().contains("cycles detected"));
+        assert!(body["dot"].as_str().unwrap().contains("digraph organon"));
+        assert!(body["mermaid"].as_str().unwrap().contains("graph TD"));
     }
 }

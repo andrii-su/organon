@@ -5,6 +5,7 @@ Supports: Python (.py), Rust (.rs), TypeScript/JavaScript (.ts/.tsx/.js/.jsx).
 Returns (from_path, to_path, kind) triples — only where to_path exists on disk.
 Never raises; returns [] on any failure.
 """
+
 import logging
 import re
 from pathlib import Path
@@ -12,6 +13,7 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 # ── public API ────────────────────────────────────────────────────────────────
+
 
 def extract_relations(path: str) -> list[tuple[str, str, str]]:
     """
@@ -54,14 +56,15 @@ _PY_IMPORT = re.compile(
     re.MULTILINE,
 )
 
+
 def _extract_python(from_path: str, content: str, base_dir: Path) -> list[tuple[str, str, str]]:
     rels = []
 
     # 1. Relative imports: `from . import utils` / `from ..common import foo`
     for m in _PY_REL_IMPORT.finditer(content):
-        dots   = m.group(1)          # "." or ".."
+        dots = m.group(1)  # "." or ".."
         module = m.group(2).strip()  # module after dots (may be empty)
-        names  = [n.strip() for n in m.group(3).split(",") if n.strip() and n.strip() != "*"]
+        names = [n.strip() for n in m.group(3).split(",") if n.strip() and n.strip() != "*"]
 
         level = len(dots)
         anchor = base_dir
@@ -136,6 +139,7 @@ def _resolve_python_module(module: str, base_dir: Path) -> Path | None:
 
 _RS_MOD = re.compile(r"^\s*mod\s+(\w+)\s*;", re.MULTILINE)
 
+
 def _extract_rust(from_path: str, content: str, base_dir: Path) -> list[tuple[str, str, str]]:
     rels = []
     for m in _RS_MOD.finditer(content):
@@ -158,6 +162,7 @@ _TS_IMPORT = re.compile(
 _TS_REQUIRE = re.compile(r"""require\s*\(\s*['"]([^'"]+)['"]\s*\)""")
 
 _TS_EXTENSIONS = [".ts", ".tsx", ".js", ".jsx", "/index.ts", "/index.tsx", "/index.js"]
+
 
 def _extract_ts(from_path: str, content: str, base_dir: Path) -> list[tuple[str, str, str]]:
     rels = []
