@@ -1,3 +1,14 @@
+# [1.2.0](https://github.com/andrii-su/organon/compare/v1.1.0...v1.2.0) (2026-04-21)
+
+
+### Features
+
+* add EntityPanel and MermaidPreview components for file inspection and visualization ([7ad8a74](https://github.com/andrii-su/organon/commit/7ad8a74110cabd9f68a4dcdfda49fc866ff8e725))
+* add GitHub Actions workflow for building macOS desktop app and update README with desktop UI instructions ([6eefe5c](https://github.com/andrii-su/organon/commit/6eefe5cb27a7439177ca27a65af7555f2c12a8ab))
+* format code for consistency and readability across multiple files ([30ab5b9](https://github.com/andrii-su/organon/commit/30ab5b98b51b4dc62567ed6ce08cdf03f1a27bc9))
+* implement relation graph functionality with cycle detection and rendering options ([f61f656](https://github.com/andrii-su/organon/commit/f61f6569f0d09b5c8e49c867748b459ef7f0653c))
+* update .gitignore and add pre-commit dependency in pyproject.toml ([52337c2](https://github.com/andrii-su/organon/commit/52337c2207b9d77dda095c24730f3619230ad826))
+
 # [1.1.0](https://github.com/andrii-su/organon/compare/v1.0.0...v1.1.0) (2026-04-21)
 
 
