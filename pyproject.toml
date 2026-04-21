@@ -19,6 +19,7 @@ organon-mcp    = "ai.mcp_server.server:main"
 
 [dependency-groups]
 dev = [
+    "pre-commit>=4.6.0",
     "pytest>=8.0",
 ]
 
