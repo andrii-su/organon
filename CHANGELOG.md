@@ -1,3 +1,24 @@
+# [1.1.0](https://github.com/andrii-su/organon/compare/v1.0.0...v1.1.0) (2026-04-21)
+
+
+### Bug Fixes
+
+* resolve clippy -D warnings errors blocking CI ([5ecda04](https://github.com/andrii-su/organon/commit/5ecda048a04b93f69b9e46c9688b8dd1b391d5b5))
+
+
+### Features
+
+* add pre-commit configuration for ruff and rustfmt, remove ruff from dev dependencies ([f4fba69](https://github.com/andrii-su/organon/commit/f4fba69429f879116bb3b33ff779b176f1e25930))
+* add ruff for linting and code quality checks ([e595d60](https://github.com/andrii-su/organon/commit/e595d60d3017b2c79df9c483f0249a3e6bce9af4))
+* apply consistent formatting and improve readability across multiple files ([feef4ea](https://github.com/andrii-su/organon/commit/feef4eaf513b72526849874cd553da20289b3aef))
+* close all partial feature gaps ([9728773](https://github.com/andrii-su/organon/commit/97287733c3e7df6c25194cdba0a6ae92b8939118))
+* history continuity across file renames ([a96a336](https://github.com/andrii-su/organon/commit/a96a336c01c0d2764ac22f9082fb9610d8bd3f3c))
+* impact analysis, duplicates, search --like, organon doctor ([73d6783](https://github.com/andrii-su/organon/commit/73d67833a2742417f2bb47853329715fa8e29296))
+* optimize sorting of rows by accessed_at using Reverse ([29ac12e](https://github.com/andrii-su/organon/commit/29ac12e40b3b521527bf5bc9fd79fcd3475098d1))
+* saved queries, search query language, rename continuity, sensitive file detection ([75f9bfd](https://github.com/andrii-su/organon/commit/75f9bfd638329572d297b9d1c7f89ce2158c2e64))
+* simplify event handling for rename operations in watcher ([3c350ea](https://github.com/andrii-su/organon/commit/3c350ea42ed11147ecf1d2dc0db05979e35de6a1))
+* update run_once test to include sensitive_skipped in returned stats ([999cc2d](https://github.com/andrii-su/organon/commit/999cc2daecfc7e8033c008500014a2a723e4c74e))
+
 # 1.0.0 (2026-04-11)
 
 
