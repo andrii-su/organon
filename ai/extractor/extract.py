@@ -1,4 +1,5 @@
 """Content extraction from files."""
+
 import logging
 import mimetypes
 from pathlib import Path
@@ -7,15 +8,42 @@ logger = logging.getLogger(__name__)
 
 # Code extensions treated as plain text
 CODE_EXTENSIONS = {
-    ".py", ".rs", ".ts", ".tsx", ".js", ".jsx",
-    ".go", ".java", ".c", ".cpp", ".h", ".hpp",
-    ".cs", ".rb", ".php", ".swift", ".kt",
-    ".sh", ".bash", ".zsh", ".fish",
-    ".toml", ".yaml", ".yml", ".json", ".xml",
-    ".sql", ".graphql",
-    ".md", ".rst", ".txt",
-    ".css", ".scss", ".html",
-    ".dockerfile", ".makefile",
+    ".py",
+    ".rs",
+    ".ts",
+    ".tsx",
+    ".js",
+    ".jsx",
+    ".go",
+    ".java",
+    ".c",
+    ".cpp",
+    ".h",
+    ".hpp",
+    ".cs",
+    ".rb",
+    ".php",
+    ".swift",
+    ".kt",
+    ".sh",
+    ".bash",
+    ".zsh",
+    ".fish",
+    ".toml",
+    ".yaml",
+    ".yml",
+    ".json",
+    ".xml",
+    ".sql",
+    ".graphql",
+    ".md",
+    ".rst",
+    ".txt",
+    ".css",
+    ".scss",
+    ".html",
+    ".dockerfile",
+    ".makefile",
 }
 
 MAX_CHARS = 32_000  # ~8k tokens — enough for embeddings
@@ -70,6 +98,7 @@ def _read_text(p: Path) -> str | None:
 def _extract_pdf(path: str) -> str | None:
     try:
         import pypdf
+
         reader = pypdf.PdfReader(path)
         text = "\n".join(page.extract_text() or "" for page in reader.pages)
         logger.debug("PDF extracted %d chars: %s", len(text), path)

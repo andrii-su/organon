@@ -2,6 +2,7 @@
 SQLite CRUD for file relationships.
 Uses the same entities.db as organon-core (relationships table added in migration).
 """
+
 import logging
 import sqlite3
 import time
@@ -21,6 +22,7 @@ def _db(db_path=DB_PATH):
 
 
 # ── write ─────────────────────────────────────────────────────────────────────
+
 
 def upsert_relations(
     relations: list[tuple[str, str, str]],
@@ -54,12 +56,12 @@ def delete_relations_from(path: str, db_path=DB_PATH) -> int:
 
 # ── read ──────────────────────────────────────────────────────────────────────
 
+
 def get_relations(path: str, db_path=DB_PATH) -> list[dict]:
     """Return all edges where path is source or target."""
     with _db(db_path) as conn:
         rows = conn.execute(
-            "SELECT from_path, to_path, kind FROM relationships "
-            "WHERE from_path = ? OR to_path = ?",
+            "SELECT from_path, to_path, kind FROM relationships WHERE from_path = ? OR to_path = ?",
             (path, path),
         ).fetchall()
     result = [{"from": r["from_path"], "to": r["to_path"], "kind": r["kind"]} for r in rows]
