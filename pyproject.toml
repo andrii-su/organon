@@ -20,7 +20,6 @@ organon-mcp    = "ai.mcp_server.server:main"
 [dependency-groups]
 dev = [
     "pytest>=8.0",
-    "ruff>=0.4",
 ]
 
 [build-system]
