@@ -1583,7 +1583,7 @@ fn cmd_history(path: &PathBuf, limit: usize, json: bool, db_path: &Path) -> Resu
     }
 
     println!("history: {path_str}");
-    println!("{:<20}  {:<12}  {}", "time", "event", "detail");
+    println!("{:<20}  {:<12}  detail", "time", "event");
     println!("{}", "-".repeat(72));
     for e in &entries {
         let ts = format_ts(e.recorded_at);
@@ -1781,7 +1781,7 @@ fn cmd_doctor(db_path: &Path, config: &OrgConfig) -> Result<()> {
         "config",
         cfg_path.exists(),
         &cfg_path.display().to_string(),
-        cfg_path.exists().then_some("").unwrap_or("not found (defaults used)"),
+        if cfg_path.exists() { "" } else { "not found (defaults used)" },
     );
 
     // ── db ────────────────────────────────────────────────────────────────────
@@ -1843,7 +1843,7 @@ fn cmd_doctor(db_path: &Path, config: &OrgConfig) -> Result<()> {
                 &python_env(config),
             ) {
                 Ok(ver) => doctor_ok(dep, &ver),
-                Err(_) => doctor_fail(dep, &format!("not importable — run `uv sync`")),
+                Err(_) => doctor_fail(dep, "not importable — run `uv sync`"),
             }
         }
     } else {
@@ -1936,7 +1936,7 @@ fn cmd_query(action: QueryCmd, db_path: &Path, config: &OrgConfig) -> Result<()>
                 println!("(no saved queries — use `organon query save <name>`)");
                 return Ok(());
             }
-            println!("{:<20}  {}", "NAME", "DEFINITION");
+            println!("{:<20}  DEFINITION", "NAME");
             println!("{}", "-".repeat(72));
             for (name, sq) in &store {
                 let desc = sq.description.as_deref().unwrap_or("");

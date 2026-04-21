@@ -188,6 +188,7 @@ pub struct McpService {
 #[derive(Clone)]
 pub struct OrganonMcpServer {
     service: Arc<McpService>,
+    #[allow(dead_code)] // used by #[tool_router] proc macro via tool_router()
     tool_router: ToolRouter<Self>,
 }
 
