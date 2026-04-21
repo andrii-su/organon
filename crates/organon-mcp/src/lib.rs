@@ -21,7 +21,10 @@ use rmcp::{
     tool, tool_handler, tool_router,
     transport::{
         stdio,
-        streamable_http_server::{StreamableHttpServerConfig, StreamableHttpService},
+        streamable_http_server::{
+            session::local::LocalSessionManager, StreamableHttpServerConfig,
+            StreamableHttpService,
+        },
     },
     ErrorData as McpError, Json, RoleServer, ServerHandler, ServiceExt,
 };
@@ -231,6 +234,67 @@ pub struct QueryGraphRequest {
     pub nl_query: String,
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct GetHistoryRequest {
+    /// Absolute path of the file to retrieve history for.
+    pub path: String,
+    /// Maximum number of entries to return (default 20).
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct HistoryResponse {
+    pub path: String,
+    /// History entries, newest first. Fields: event, recorded_at, old_lifecycle, new_lifecycle,
+    /// old_path (rename), size_bytes, content_hash.
+    pub entries: Vec<serde_json::Value>,
+    pub total: usize,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ImpactRequest {
+    /// Absolute path of the file to analyse.
+    pub path: String,
+    /// BFS depth for reverse-dependency traversal (default 5).
+    pub depth: Option<u8>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ImpactResponse {
+    pub path: String,
+    pub depth: u8,
+    pub total: usize,
+    /// Impact entries, sorted by depth then path. Fields: path, kind, depth.
+    pub entries: Vec<serde_json::Value>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct FindDuplicatesRequest {
+    /// When true, also find near-duplicates via embedding similarity (slower).
+    pub near: Option<bool>,
+    /// Similarity threshold for near-duplicates, 0–1 (default 0.95).
+    pub threshold: Option<f64>,
+    /// Max near-duplicate pairs to return (default 50).
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct FindDuplicatesResponse {
+    /// Groups of files sharing the same content hash. Fields: content_hash, paths.
+    pub exact: Vec<serde_json::Value>,
+    pub near: Option<Vec<serde_json::Value>>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SearchSimilarRequest {
+    /// Absolute path of the reference file.
+    pub path: String,
+    /// Max results (default 10).
+    pub limit: Option<usize>,
+    /// Optional directory prefix to scope results.
+    pub path_prefix: Option<String>,
+}
+
 impl McpService {
     pub fn new(db_path: PathBuf, config: OrgConfig) -> Self {
         Self { db_path, config }
@@ -292,6 +356,94 @@ impl McpService {
             by_lifecycle,
             db_path: self.db_path.display().to_string(),
         })
+    }
+
+    pub fn get_history(&self, path: &str, limit: usize) -> Result<HistoryResponse> {
+        let entries = self.open_graph()?.get_history(path, limit)?;
+        let total = entries.len();
+        let entries_json: Vec<serde_json::Value> = entries
+            .into_iter()
+            .map(|e| serde_json::to_value(e).unwrap_or(serde_json::Value::Null))
+            .collect();
+        Ok(HistoryResponse {
+            path: path.to_string(),
+            entries: entries_json,
+            total,
+        })
+    }
+
+    pub fn get_impact(&self, path: &str, depth: u8) -> Result<ImpactResponse> {
+        let entries = self.open_graph()?.reverse_deps(path, depth)?;
+        let total = entries.len();
+        let entries_json = entries
+            .into_iter()
+            .map(|e| serde_json::to_value(e).unwrap_or(serde_json::Value::Null))
+            .collect();
+        Ok(ImpactResponse {
+            total,
+            path: path.to_string(),
+            depth,
+            entries: entries_json,
+        })
+    }
+
+    pub fn find_duplicates(
+        &self,
+        near: bool,
+        threshold: f64,
+        limit: usize,
+    ) -> Result<FindDuplicatesResponse> {
+        let graph = self.open_graph()?;
+        let exact = graph
+            .exact_duplicates()?
+            .into_iter()
+            .map(|g| serde_json::to_value(g).unwrap_or(serde_json::Value::Null))
+            .collect();
+        let near_pairs = if near {
+            let output = self.python_run(&[
+                "-c",
+                &format!(
+                    "from ai.embeddings.store import find_near_duplicates; import json; \
+                     print(json.dumps(find_near_duplicates(threshold={threshold}, limit={limit}, db_path={:?})))",
+                    self.config.indexer.vectors_path,
+                ),
+            ])?;
+            Some(serde_json::from_str::<Vec<serde_json::Value>>(&output)?)
+        } else {
+            None
+        };
+        Ok(FindDuplicatesResponse { exact, near: near_pairs })
+    }
+
+    pub fn search_similar(
+        &self,
+        path: &str,
+        limit: usize,
+        path_prefix: Option<&str>,
+    ) -> Result<Vec<SearchHit>> {
+        let output = self.python_run(&[
+            "-c",
+            &format!(
+                "from ai.embeddings.store import search_by_path; import json; \
+                 print(json.dumps(search_by_path({path:?}, limit={limit}, db_path={:?}, path_prefix={})))",
+                self.config.indexer.vectors_path,
+                path_prefix
+                    .map(|p| format!("{p:?}"))
+                    .unwrap_or_else(|| "None".to_string()),
+            ),
+        ])?;
+        let rows: Vec<serde_json::Value> = serde_json::from_str(&output)?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|r| {
+                Some(SearchHit {
+                    path: r["path"].as_str()?.to_string(),
+                    score: r["score"].as_f64().unwrap_or(0.0),
+                    source: "vector".to_string(),
+                    explanation: None,
+                })
+            })
+            .collect())
     }
 
     pub fn get_graph(&self, path: &str, depth: u8) -> Result<RelationGraph> {
@@ -725,22 +877,77 @@ impl OrganonMcpServer {
             .map(Json)
             .map_err(|e| e.to_string())
     }
+
+    #[tool(
+        description = "Return lifecycle and change history for a file. Events: created, modified, lifecycle, renamed, deleted."
+    )]
+    async fn get_history(
+        &self,
+        Parameters(req): Parameters<GetHistoryRequest>,
+    ) -> Result<Json<HistoryResponse>, String> {
+        self.service
+            .get_history(&req.path, req.limit.unwrap_or(20))
+            .map(Json)
+            .map_err(|e| e.to_string())
+    }
+
+    #[tool(
+        description = "Reverse dependency analysis: show what files import/depend on a given file. Useful before rename, refactor, or delete."
+    )]
+    async fn get_impact(
+        &self,
+        Parameters(req): Parameters<ImpactRequest>,
+    ) -> Result<Json<ImpactResponse>, String> {
+        self.service
+            .get_impact(&req.path, req.depth.unwrap_or(5))
+            .map(Json)
+            .map_err(|e| e.to_string())
+    }
+
+    #[tool(
+        description = "Find exact duplicates (same content hash) and optionally near-duplicates (embedding similarity). Useful for cleanup."
+    )]
+    async fn find_duplicates(
+        &self,
+        Parameters(req): Parameters<FindDuplicatesRequest>,
+    ) -> Result<Json<FindDuplicatesResponse>, String> {
+        self.service
+            .find_duplicates(
+                req.near.unwrap_or(false),
+                req.threshold.unwrap_or(0.95),
+                req.limit.unwrap_or(50),
+            )
+            .map(Json)
+            .map_err(|e| e.to_string())
+    }
+
+    #[tool(
+        description = "Find files semantically similar to a given file using its existing vector embedding."
+    )]
+    async fn search_similar(
+        &self,
+        Parameters(req): Parameters<SearchSimilarRequest>,
+    ) -> Result<Json<SearchFilesResponse>, String> {
+        self.service
+            .search_similar(&req.path, req.limit.unwrap_or(10), req.path_prefix.as_deref())
+            .map(|items| Json(SearchFilesResponse { items }))
+            .map_err(|e| e.to_string())
+    }
 }
 
 #[tool_handler]
 impl ServerHandler for OrganonMcpServer {
     fn get_info(&self) -> ServerInfo {
-        ServerInfo {
-            instructions: Some(
-                "Local semantic filesystem graph. Tools return structured JSON objects. Resources expose entity summaries."
-                    .into(),
-            ),
-            capabilities: ServerCapabilities::builder()
-                .enable_tools()
-                .enable_resources()
-                .build(),
-            ..Default::default()
-        }
+        let mut info = ServerInfo::default();
+        info.instructions = Some(
+            "Local semantic filesystem graph. Tools return structured JSON objects. Resources expose entity summaries."
+                .into(),
+        );
+        info.capabilities = ServerCapabilities::builder()
+            .enable_tools()
+            .enable_resources()
+            .build();
+        info
     }
 
     async fn list_resources(
@@ -771,9 +978,10 @@ impl ServerHandler for OrganonMcpServer {
             ));
         };
 
-        Ok(ReadResourceResult {
-            contents: vec![ResourceContents::text(text, &request.uri)],
-        })
+        Ok(ReadResourceResult::new(vec![ResourceContents::text(
+            text,
+            request.uri.as_str(),
+        )]))
     }
 }
 
@@ -786,9 +994,9 @@ pub async fn serve_stdio(service: McpService) -> Result<()> {
 pub async fn serve_streamable_http(service: McpService, host: String, port: u16) -> Result<()> {
     let addr = format!("{host}:{port}");
     let listener = tokio::net::TcpListener::bind(&addr).await?;
-    let transport: StreamableHttpService<OrganonMcpServer> = StreamableHttpService::new(
+    let transport = StreamableHttpService::new(
         move || Ok::<_, std::io::Error>(OrganonMcpServer::new(service.clone())),
-        Default::default(),
+        Arc::new(LocalSessionManager::default()),
         StreamableHttpServerConfig::default(),
     );
     let router = Router::new().nest_service("/mcp", transport);

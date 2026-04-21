@@ -12,7 +12,7 @@ use axum::{
 use chrono::NaiveDate;
 use organon_core::{
     config::OrgConfig,
-    graph::{FindFilter, Graph},
+    graph::{DuplicateGroup, FindFilter, Graph, HistoryEntry, ImpactEntry},
     scanner,
 };
 use serde::{Deserialize, Serialize};
@@ -93,7 +93,10 @@ struct PathQuery {
 
 #[derive(Debug, Deserialize)]
 struct SearchQuery {
+    #[serde(default)]
     q: String,
+    /// Find files similar to this file (mutually exclusive with q)
+    like: Option<String>,
     limit: Option<usize>,
     offset: Option<usize>,
     dir: Option<PathBuf>,
@@ -104,6 +107,50 @@ struct SearchQuery {
     created_after: Option<String>,
     modified_after: Option<String>,
     explain: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ImpactQuery {
+    path: String,
+    #[serde(default = "default_impact_depth")]
+    depth: u8,
+}
+
+fn default_impact_depth() -> u8 {
+    5
+}
+
+#[derive(Debug, Deserialize)]
+struct DuplicatesQuery {
+    #[serde(default)]
+    near: bool,
+    #[serde(default = "default_dup_threshold")]
+    threshold: f64,
+    #[serde(default = "default_dup_limit")]
+    limit: usize,
+}
+
+fn default_dup_threshold() -> f64 {
+    0.95
+}
+
+fn default_dup_limit() -> usize {
+    50
+}
+
+#[derive(Debug, Serialize)]
+struct ImpactResponse {
+    path: String,
+    depth: u8,
+    total: usize,
+    entries: Vec<ImpactEntry>,
+}
+
+#[derive(Debug, Serialize)]
+struct DuplicatesResponse {
+    exact: Vec<DuplicateGroup>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    near: Option<Vec<serde_json::Value>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -165,6 +212,9 @@ pub fn router(state: ApiState) -> Router {
         .route("/stats", get(stats))
         .route("/entities", get(list_entities))
         .route("/entity", get(get_entity))
+        .route("/history", get(get_history))
+        .route("/impact", get(get_impact))
+        .route("/duplicates", get(get_duplicates))
         .route("/relations", get(get_relations))
         .route("/search", get(search))
         .route("/clean", post(clean))
@@ -276,6 +326,46 @@ async fn openapi_json() -> Json<Value> {
                     }
                 }
             },
+            "/history": {
+                "get": {
+                    "summary": "Get lifecycle and change history for a file",
+                    "parameters": [
+                        query_param("path", "Absolute file path", true, json!({"type": "string"})),
+                        query_param("limit", "Max entries (default 20)", false, json!({"type": "integer", "minimum": 1, "default": 20}))
+                    ],
+                    "responses": {
+                        "200": json_response("History entries", json!({"type": "array", "items": ref_schema("HistoryEntry")})),
+                        "500": error_response("Internal error")
+                    }
+                }
+            },
+            "/impact": {
+                "get": {
+                    "summary": "Reverse dependency analysis — who depends on this file",
+                    "parameters": [
+                        query_param("path", "Absolute file path", true, json!({"type": "string"})),
+                        query_param("depth", "BFS depth (default 5)", false, json!({"type": "integer", "minimum": 1, "default": 5}))
+                    ],
+                    "responses": {
+                        "200": json_response("Impact report", ref_schema("ImpactResponse")),
+                        "500": error_response("Internal error")
+                    }
+                }
+            },
+            "/duplicates": {
+                "get": {
+                    "summary": "Find exact and near-duplicate files",
+                    "parameters": [
+                        query_param("near", "Also find near-duplicates via embeddings", false, json!({"type": "boolean", "default": false})),
+                        query_param("threshold", "Similarity threshold for near-duplicates", false, json!({"type": "number", "minimum": 0, "maximum": 1, "default": 0.95})),
+                        query_param("limit", "Max near-duplicate pairs", false, json!({"type": "integer", "minimum": 1, "default": 50}))
+                    ],
+                    "responses": {
+                        "200": json_response("Duplicate groups", ref_schema("DuplicatesResponse")),
+                        "500": error_response("Internal error")
+                    }
+                }
+            },
             "/relations": {
                 "get": {
                     "summary": "Get relations for path",
@@ -292,7 +382,8 @@ async fn openapi_json() -> Json<Value> {
                 "get": {
                     "summary": "Search entities with pagination",
                     "parameters": [
-                        query_param("q", "Search query", true, json!({"type": "string", "minLength": 1})),
+                        query_param("q", "Search query (mutually exclusive with like)", false, json!({"type": "string"})),
+                        query_param("like", "Find files similar to this file path (mutually exclusive with q)", false, json!({"type": "string"})),
                         query_param("limit", "Page size", false, json!({"type": "integer", "minimum": 1})),
                         query_param("offset", "Result offset", false, json!({"type": "integer", "minimum": 0, "default": 0})),
                         query_param("dir", "Optional directory prefix", false, json!({"type": "string"})),
@@ -469,6 +560,57 @@ async fn openapi_json() -> Json<Value> {
                         "skipped": { "type": "integer", "minimum": 0 },
                         "errors": { "type": "integer", "minimum": 0 }
                     }
+                },
+                "HistoryEntry": {
+                    "type": "object",
+                    "required": ["id", "entity_id", "path", "event", "recorded_at"],
+                    "properties": {
+                        "id": { "type": "integer" },
+                        "entity_id": { "type": "string" },
+                        "path": { "type": "string" },
+                        "event": { "type": "string", "enum": ["created", "modified", "lifecycle", "renamed", "deleted"] },
+                        "old_lifecycle": { "type": ["string", "null"] },
+                        "new_lifecycle": { "type": ["string", "null"] },
+                        "old_path": { "type": ["string", "null"] },
+                        "size_bytes": { "type": ["integer", "null"] },
+                        "content_hash": { "type": ["string", "null"] },
+                        "recorded_at": { "type": "integer" }
+                    }
+                },
+                "ImpactEntry": {
+                    "type": "object",
+                    "required": ["path", "kind", "depth"],
+                    "properties": {
+                        "path": { "type": "string" },
+                        "kind": { "type": "string" },
+                        "depth": { "type": "integer", "minimum": 1 }
+                    }
+                },
+                "ImpactResponse": {
+                    "type": "object",
+                    "required": ["path", "depth", "total", "entries"],
+                    "properties": {
+                        "path": { "type": "string" },
+                        "depth": { "type": "integer" },
+                        "total": { "type": "integer", "minimum": 0 },
+                        "entries": { "type": "array", "items": ref_schema("ImpactEntry") }
+                    }
+                },
+                "DuplicateGroup": {
+                    "type": "object",
+                    "required": ["content_hash", "paths"],
+                    "properties": {
+                        "content_hash": { "type": "string" },
+                        "paths": { "type": "array", "items": { "type": "string" } }
+                    }
+                },
+                "DuplicatesResponse": {
+                    "type": "object",
+                    "required": ["exact"],
+                    "properties": {
+                        "exact": { "type": "array", "items": ref_schema("DuplicateGroup") },
+                        "near": { "type": "array", "nullable": true }
+                    }
                 }
             }
         }
@@ -610,6 +752,99 @@ async fn get_entity(
     }
 }
 
+#[derive(Debug, Deserialize)]
+struct HistoryQuery {
+    path: String,
+    #[serde(default = "default_history_limit")]
+    limit: usize,
+}
+
+fn default_history_limit() -> usize {
+    20
+}
+
+async fn get_history(
+    State(state): State<ApiState>,
+    Query(query): Query<HistoryQuery>,
+) -> ApiResult<Json<Vec<HistoryEntry>>> {
+    let db_path = state.db_path.clone();
+    let path = query.path;
+    let limit = query.limit;
+    let result = tokio::task::spawn_blocking(move || -> Result<Vec<HistoryEntry>> {
+        let graph = open_graph(&db_path)?;
+        graph.get_history(&path, limit)
+    })
+    .await
+    .map_err(|e| ApiError::internal(anyhow!(e)))??;
+
+    Ok(Json(result))
+}
+
+async fn get_impact(
+    State(state): State<ApiState>,
+    Query(query): Query<ImpactQuery>,
+) -> ApiResult<Json<ImpactResponse>> {
+    let db_path = state.db_path.clone();
+    let path = query.path;
+    let depth = query.depth;
+    let result = tokio::task::spawn_blocking(move || -> Result<ImpactResponse> {
+        let graph = open_graph(&db_path)?;
+        let entries = graph.reverse_deps(&path, depth)?;
+        Ok(ImpactResponse {
+            total: entries.len(),
+            path,
+            depth,
+            entries,
+        })
+    })
+    .await
+    .map_err(|e| ApiError::internal(anyhow!(e)))??;
+
+    Ok(Json(result))
+}
+
+async fn get_duplicates(
+    State(state): State<ApiState>,
+    Query(query): Query<DuplicatesQuery>,
+) -> ApiResult<Json<DuplicatesResponse>> {
+    let db_path = state.db_path.clone();
+    let config = state.config.clone();
+    let near = query.near;
+    let threshold = query.threshold;
+    let limit = query.limit;
+
+    let result = tokio::task::spawn_blocking(move || -> Result<DuplicatesResponse> {
+        let graph = open_graph(&db_path)?;
+        let exact = graph.exact_duplicates()?;
+
+        let near_pairs = if near {
+            let output = python_run_with_env(
+                &[
+                    "-c",
+                    &format!(
+                        "from ai.embeddings.store import find_near_duplicates; import json; \
+                         print(json.dumps(find_near_duplicates(threshold={threshold}, limit={limit}, db_path={:?})))",
+                        config.indexer.vectors_path,
+                    ),
+                ],
+                &python_env(&config),
+            )?;
+            Some(serde_json::from_str::<Vec<serde_json::Value>>(&output)?)
+        } else {
+            None
+        };
+
+        Ok(DuplicatesResponse {
+            exact,
+            near: near_pairs,
+        })
+    })
+    .await
+    .map_err(|e| ApiError::internal(anyhow!(e)))??;
+
+    Ok(Json(result))
+}
+
 async fn get_relations(
     State(state): State<ApiState>,
     Query(query): Query<PathQuery>,
@@ -635,16 +870,30 @@ async fn search(
     State(state): State<ApiState>,
     Query(query): Query<SearchQuery>,
 ) -> ApiResult<Json<crate::search::SearchPage>> {
-    if query.q.trim().is_empty() {
-        return Err(ApiError::bad_request("missing query parameter `q`"));
+    let has_q = !query.q.trim().is_empty();
+    let has_like = query.like.is_some();
+
+    if !has_q && !has_like {
+        return Err(ApiError::bad_request("provide `q` or `like`"));
     }
 
     let db_path = state.db_path.clone();
     let config = state.config.clone();
     let limit = query.limit.unwrap_or(config.search.default_limit);
     let offset = query.offset.unwrap_or(0);
-    let mode = query.mode.unwrap_or_else(|| default_search_mode(&config));
     let dir = query.dir;
+
+    if has_like {
+        let like_path = query.like.unwrap();
+        let result = tokio::task::spawn_blocking(move || {
+            crate::search::search_by_example(&like_path, limit, offset, dir.as_deref(), &config)
+        })
+        .await
+        .map_err(|e| ApiError::internal(anyhow!(e)))??;
+        return Ok(Json(result));
+    }
+
+    let mode = query.mode.unwrap_or_else(|| default_search_mode(&config));
     let q = query.q;
     let metadata_filter = build_find_filter(FindFilterParams {
         state: query.state,

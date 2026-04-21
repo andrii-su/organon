@@ -17,14 +17,16 @@ use log::{debug, info, LevelFilter};
 use organon_core::{
     config::OrgConfig,
     entity::Entity,
-    graph::{FindFilter, Graph},
+    graph::{DuplicateGroup, FindFilter, Graph, ImpactEntry},
     ignore::IgnoreSet,
     scanner,
 };
 
 use format::{format_ts, human_bytes};
 use python::{python_exec_with_env, python_run_with_env};
-use search::{default_search_mode, python_env, search_entities, SearchMode, SearchParams};
+use search::{
+    default_search_mode, python_env, search_by_example, search_entities, SearchMode, SearchParams,
+};
 
 #[derive(Parser)]
 #[command(name = "organon", about = "Local semantic filesystem layer", version)]
@@ -154,10 +156,15 @@ enum Cmd {
 
     /// Semantic search (requires Python + indexer)
     #[command(
-        after_long_help = "Examples:\n  organon search \"sqlite graph\"\n  organon search \"imports\" --state active --ext rs\n  organon search \"watcher\" --modified-after 2026-01-01 --mode hybrid\n  organon search \"auth token\" --mode hybrid --explain"
+        after_long_help = "Examples:\n  organon search \"sqlite graph\"\n  organon search \"imports\" --state active --ext rs\n  organon search \"watcher\" --modified-after 2026-01-01 --mode hybrid\n  organon search \"auth token\" --mode hybrid --explain\n  organon search --like src/auth.rs --limit 5"
     )]
     Search {
-        query: String,
+        /// Query text (mutually exclusive with --like)
+        query: Option<String>,
+
+        /// Find files similar to this file using vector embeddings (mutually exclusive with query)
+        #[arg(long, value_name = "PATH", conflicts_with = "query")]
+        like: Option<PathBuf>,
 
         #[arg(short, long)]
         limit: Option<usize>,
@@ -253,6 +260,63 @@ enum Cmd {
         #[arg(long, value_enum, default_value = "text")]
         format: GraphFormat,
     },
+
+    /// Show lifecycle and change history for a file
+    #[command(
+        after_long_help = "Examples:\n  organon history src/main.rs\n  organon history src/main.rs --limit 20\n  organon history src/main.rs --json"
+    )]
+    History {
+        path: PathBuf,
+
+        /// Maximum number of entries to show (default 20)
+        #[arg(short, long, default_value = "20")]
+        limit: usize,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Show reverse dependencies — what would break if this file changes
+    #[command(
+        after_long_help = "Examples:\n  organon impact src/auth.rs\n  organon impact src/graph.rs --depth 3\n  organon impact src/lib.rs --json"
+    )]
+    Impact {
+        path: PathBuf,
+
+        /// BFS depth (1 = direct importers only, default 5)
+        #[arg(short, long, default_value = "5")]
+        depth: u8,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Find exact and near-duplicate files
+    #[command(
+        after_long_help = "Examples:\n  organon duplicates\n  organon duplicates --near\n  organon duplicates --near --threshold 0.92 --limit 20"
+    )]
+    Duplicates {
+        /// Also find near-duplicates by embedding similarity (requires Python + indexer)
+        #[arg(long)]
+        near: bool,
+
+        /// Similarity threshold for near-duplicates [0..1] (default 0.95)
+        #[arg(long, default_value = "0.95")]
+        threshold: f64,
+
+        /// Max near-duplicate pairs (default 50)
+        #[arg(long, default_value = "50")]
+        limit: usize,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Diagnose organon installation and runtime health
+    Doctor,
 }
 
 fn main() -> Result<()> {
@@ -306,6 +370,7 @@ fn main() -> Result<()> {
         Cmd::Stats => cmd_stats(&db_path),
         Cmd::Search {
             query,
+            like,
             limit,
             dir,
             mode,
@@ -314,19 +379,27 @@ fn main() -> Result<()> {
             created_after,
             modified_after,
             explain,
-        } => cmd_search(
-            &query,
-            limit,
-            dir.as_deref(),
-            mode,
-            state,
-            extension,
-            created_after,
-            modified_after,
-            explain,
-            &config,
-            &db_path,
-        ),
+        } => match (query, like) {
+            (Some(q), _) => cmd_search(
+                &q,
+                limit,
+                dir.as_deref(),
+                mode,
+                state,
+                extension,
+                created_after,
+                modified_after,
+                explain,
+                &config,
+                &db_path,
+            ),
+            (None, Some(path)) => {
+                cmd_search_like(&path, limit, dir.as_deref(), &config, &db_path)
+            }
+            (None, None) => {
+                anyhow::bail!("provide a search query or --like <path>")
+            }
+        },
         Cmd::Index { watch } => cmd_index(watch, &db_path, &config),
         Cmd::Diff { path, json } => cmd_diff(path.as_deref(), json, &db_path, &config),
         Cmd::Export { format, output } => cmd_export(&db_path, format, output.as_deref()),
@@ -343,6 +416,15 @@ fn main() -> Result<()> {
             depth,
             format,
         } => cmd_graph(&path, depth, format, &db_path),
+        Cmd::History { path, limit, json } => cmd_history(&path, limit, json, &db_path),
+        Cmd::Impact { path, depth, json } => cmd_impact(&path, depth, json, &db_path),
+        Cmd::Duplicates {
+            near,
+            threshold,
+            limit,
+            json,
+        } => cmd_duplicates(near, threshold, limit, json, &db_path, &config),
+        Cmd::Doctor => cmd_doctor(&db_path, &config),
     }
 }
 
@@ -1382,6 +1464,332 @@ fn resolve_watch_roots(path: Option<&Path>, config: &OrgConfig) -> Result<Vec<Pa
         }
     }
     Ok(roots)
+}
+
+fn cmd_history(path: &PathBuf, limit: usize, json: bool, db_path: &Path) -> Result<()> {
+    let graph = open_graph(db_path)?;
+    let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.clone());
+    let path_str = canonical.to_string_lossy();
+    debug!("history: {path_str} limit={limit}");
+
+    let entries = graph.get_history(&path_str, limit)?;
+
+    if entries.is_empty() {
+        println!("no history found for: {path_str}");
+        return Ok(());
+    }
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&entries)?);
+        return Ok(());
+    }
+
+    println!("history: {path_str}");
+    println!("{:<20}  {:<12}  {}", "time", "event", "detail");
+    println!("{}", "-".repeat(72));
+    for e in &entries {
+        let ts = format_ts(e.recorded_at);
+        let detail = match e.event.as_str() {
+            "created" => format!(
+                "lifecycle={}{}",
+                e.new_lifecycle.as_deref().unwrap_or("?"),
+                e.size_bytes
+                    .map(|b| format!("  size={b}"))
+                    .unwrap_or_default()
+            ),
+            "modified" => format!(
+                "hash={}",
+                e.content_hash
+                    .as_deref()
+                    .map(|h| &h[..16.min(h.len())])
+                    .unwrap_or("?")
+            ),
+            "lifecycle" => format!(
+                "{} → {}",
+                e.old_lifecycle.as_deref().unwrap_or("?"),
+                e.new_lifecycle.as_deref().unwrap_or("?")
+            ),
+            "renamed" => format!("from {}", e.old_path.as_deref().unwrap_or("?")),
+            "deleted" => format!("was {}", e.old_lifecycle.as_deref().unwrap_or("?")),
+            other => other.to_string(),
+        };
+        println!("{ts:<20}  {:<12}  {detail}", e.event);
+    }
+    Ok(())
+}
+
+fn cmd_search_like(
+    like_path: &PathBuf,
+    limit: Option<usize>,
+    dir: Option<&Path>,
+    config: &OrgConfig,
+    db_path: &Path,
+) -> Result<()> {
+    if !db_path.exists() {
+        anyhow::bail!(
+            "DB not found: {}\nRun `organon watch <dir>` first.",
+            db_path.display()
+        );
+    }
+    let canonical = std::fs::canonicalize(like_path).unwrap_or_else(|_| like_path.clone());
+    let path_str = canonical.to_string_lossy().to_string();
+    let limit = limit.unwrap_or(config.search.default_limit);
+
+    info!("search --like: {path_str} limit={limit}");
+    let results = search_by_example(&path_str, limit, 0, dir, config)?;
+
+    if results.items.is_empty() {
+        println!("(no results — run `organon index` first or file not indexed)");
+        return Ok(());
+    }
+
+    println!("{:<6}  PATH", "SCORE");
+    println!("{}", "-".repeat(80));
+    for hit in results.items {
+        println!("{:.3}   {}", hit.score, hit.path);
+    }
+    Ok(())
+}
+
+fn cmd_impact(path: &PathBuf, depth: u8, json: bool, db_path: &Path) -> Result<()> {
+    let graph = open_graph(db_path)?;
+    let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.clone());
+    let path_str = canonical.to_string_lossy();
+
+    let entries = graph.reverse_deps(&path_str, depth)?;
+
+    if json {
+        #[derive(serde::Serialize)]
+        struct ImpactReport<'a> {
+            path: &'a str,
+            depth: u8,
+            total: usize,
+            entries: &'a [ImpactEntry],
+        }
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&ImpactReport {
+                path: &path_str,
+                depth,
+                total: entries.len(),
+                entries: &entries,
+            })?
+        );
+        return Ok(());
+    }
+
+    println!("impact: {path_str}");
+    if entries.is_empty() {
+        println!("  (no dependents found up to depth {depth})");
+        return Ok(());
+    }
+    println!("  {} dependent(s) within depth {depth}\n", entries.len());
+    println!("{:<5}  {:<10}  PATH", "DEPTH", "KIND");
+    println!("{}", "-".repeat(80));
+    for e in &entries {
+        println!("  {:<3}  {:<10}  {}", e.depth, e.kind, e.path);
+    }
+    Ok(())
+}
+
+fn cmd_duplicates(
+    near: bool,
+    threshold: f64,
+    limit: usize,
+    json: bool,
+    db_path: &Path,
+    config: &OrgConfig,
+) -> Result<()> {
+    let graph = open_graph(db_path)?;
+    let exact = graph.exact_duplicates()?;
+
+    if near {
+        // Near-duplicate detection via Python embeddings
+        let output = python_run_with_env(
+            &[
+                "-c",
+                &format!(
+                    "from ai.embeddings.store import find_near_duplicates; import json; \
+                     print(json.dumps(find_near_duplicates(threshold={threshold}, limit={limit}, db_path={:?})))",
+                    config.indexer.vectors_path,
+                ),
+            ],
+            &python_env(config),
+        )?;
+        let near_pairs: Vec<serde_json::Value> = serde_json::from_str(&output)?;
+
+        if json {
+            #[derive(serde::Serialize)]
+            struct DupReport<'a> {
+                exact: &'a [DuplicateGroup],
+                near: &'a [serde_json::Value],
+            }
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&DupReport {
+                    exact: &exact,
+                    near: &near_pairs,
+                })?
+            );
+            return Ok(());
+        }
+
+        print_exact_dups(&exact);
+        println!();
+        println!("near-duplicates (similarity >= {threshold:.2}):");
+        if near_pairs.is_empty() {
+            println!("  (none found)");
+        } else {
+            for p in &near_pairs {
+                let sim = p["similarity"].as_f64().unwrap_or(0.0);
+                println!(
+                    "  {:.3}  {}  ↔  {}",
+                    sim,
+                    p["file1"].as_str().unwrap_or("?"),
+                    p["file2"].as_str().unwrap_or("?"),
+                );
+            }
+        }
+    } else {
+        if json {
+            println!("{}", serde_json::to_string_pretty(&exact)?);
+            return Ok(());
+        }
+        print_exact_dups(&exact);
+    }
+    Ok(())
+}
+
+fn print_exact_dups(groups: &[DuplicateGroup]) {
+    println!("exact duplicates (by content hash):");
+    if groups.is_empty() {
+        println!("  (none)");
+        return;
+    }
+    for g in groups {
+        println!("  {}:", &g.content_hash[..16.min(g.content_hash.len())]);
+        for p in &g.paths {
+            println!("    {p}");
+        }
+    }
+}
+
+fn cmd_doctor(db_path: &Path, config: &OrgConfig) -> Result<()> {
+    println!("organon doctor\n");
+
+    // ── config ────────────────────────────────────────────────────────────────
+    let cfg_path = config_path();
+    doctor_check(
+        "config",
+        cfg_path.exists(),
+        &cfg_path.display().to_string(),
+        cfg_path.exists().then_some("").unwrap_or("not found (defaults used)"),
+    );
+
+    // ── db ────────────────────────────────────────────────────────────────────
+    if !db_path.exists() {
+        doctor_fail("db", &format!("{} — not found; run `organon watch .` first", db_path.display()));
+        doctor_skip("schema", "db not found");
+        doctor_skip("vectors", "skip");
+    } else {
+        match Graph::open(db_path.to_str().unwrap_or("")) {
+            Err(e) => {
+                doctor_fail("db", &e.to_string());
+                doctor_skip("schema", "db error");
+            }
+            Ok(graph) => {
+                let entities = graph.entity_count().unwrap_or(0);
+                let relations = graph.relation_count().unwrap_or(0);
+                doctor_ok("db", &format!("{} ({entities} entities, {relations} relations)", db_path.display()));
+
+                let tables = graph.table_names().unwrap_or_default();
+                let required = ["entities", "entity_history", "relationships", "entities_fts"];
+                let missing: Vec<_> = required.iter().filter(|t| !tables.iter().any(|n| n == **t)).collect();
+                if missing.is_empty() {
+                    doctor_ok("schema", &tables.join(", "));
+                } else {
+                    doctor_fail("schema", &format!("missing: {}", missing.iter().map(|t| **t).collect::<Vec<_>>().join(", ")));
+                }
+            }
+        }
+
+        // ── vectors dir ───────────────────────────────────────────────────────
+        let vectors_path = std::path::PathBuf::from(&config.indexer.vectors_path);
+        if vectors_path.exists() {
+            doctor_ok("vectors", &config.indexer.vectors_path);
+        } else {
+            doctor_warn("vectors", &format!("{} (not found; run `organon index`)", config.indexer.vectors_path));
+        }
+    }
+
+    // ── python ────────────────────────────────────────────────────────────────
+    let python_ok = match python_run_with_env(
+        &["-c", "import sys; print(sys.version.split()[0])"],
+        &python_env(config),
+    ) {
+        Ok(ver) => {
+            doctor_ok("python", &ver);
+            true
+        }
+        Err(e) => {
+            doctor_fail("python", &e.to_string());
+            false
+        }
+    };
+
+    // ── python deps ───────────────────────────────────────────────────────────
+    if python_ok {
+        for dep in &["lancedb", "fastembed"] {
+            match python_run_with_env(
+                &["-c", &format!("import {dep}; print({dep}.__version__)")],
+                &python_env(config),
+            ) {
+                Ok(ver) => doctor_ok(dep, &ver),
+                Err(_) => doctor_fail(dep, &format!("not importable — run `uv sync`")),
+            }
+        }
+    } else {
+        doctor_skip("lancedb", "python not available");
+        doctor_skip("fastembed", "python not available");
+    }
+
+    // ── ollama (optional) ─────────────────────────────────────────────────────
+    let ollama_up = std::net::TcpStream::connect_timeout(
+        &"127.0.0.1:11434".parse().unwrap(),
+        std::time::Duration::from_secs(1),
+    )
+    .is_ok();
+    if ollama_up {
+        doctor_ok("ollama", "reachable at localhost:11434");
+    } else {
+        doctor_skip("ollama", "not reachable at localhost:11434 (optional; used for summaries)");
+    }
+
+    Ok(())
+}
+
+fn doctor_ok(label: &str, detail: &str) {
+    println!("  [OK]    {label:<12}  {detail}");
+}
+
+fn doctor_fail(label: &str, detail: &str) {
+    println!("  [FAIL]  {label:<12}  {detail}");
+}
+
+fn doctor_warn(label: &str, detail: &str) {
+    println!("  [WARN]  {label:<12}  {detail}");
+}
+
+fn doctor_skip(label: &str, detail: &str) {
+    println!("  [SKIP]  {label:<12}  {detail}");
+}
+
+fn doctor_check(label: &str, ok: bool, _detail: &str, extra: &str) {
+    if ok {
+        doctor_ok(label, _detail);
+    } else {
+        doctor_warn(label, extra);
+    }
 }
 
 #[cfg(test)]

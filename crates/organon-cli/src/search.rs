@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use clap::ValueEnum;
@@ -365,6 +365,69 @@ fn apply_metadata_filter(
         }
     }
     Ok(filtered)
+}
+
+/// Find files similar to `like_path` using its existing vector embedding.
+/// Returns a `SearchPage` compatible with the text-search path.
+pub fn search_by_example(
+    like_path: &str,
+    limit: usize,
+    offset: usize,
+    dir: Option<&Path>,
+    config: &OrgConfig,
+) -> Result<SearchPage> {
+    let path_prefix = dir.map(|p| {
+        std::fs::canonicalize(p)
+            .unwrap_or_else(|_| p.to_path_buf())
+            .to_string_lossy()
+            .to_string()
+    });
+
+    let canonical = std::fs::canonicalize(like_path)
+        .unwrap_or_else(|_| PathBuf::from(like_path));
+    let path_str = canonical.to_string_lossy().to_string();
+
+    let output = python_run_with_env(
+        &[
+            "-c",
+            &format!(
+                "from ai.embeddings.store import search_by_path; import json; \
+                 print(json.dumps(search_by_path({:?}, limit={}, db_path={:?}, path_prefix={})))",
+                path_str,
+                (limit + offset).max(1),
+                config.indexer.vectors_path,
+                path_prefix
+                    .as_ref()
+                    .map(|p| format!("{p:?}"))
+                    .unwrap_or_else(|| "None".to_string()),
+            ),
+        ],
+        &python_env(config),
+    )?;
+
+    let results: Vec<serde_json::Value> = serde_json::from_str(&output)?;
+    let total = results.len();
+    let items = results
+        .into_iter()
+        .skip(offset)
+        .take(limit)
+        .filter_map(|r| {
+            Some(SearchHit {
+                path: r["path"].as_str()?.to_string(),
+                score: r["score"].as_f64().unwrap_or(0.0),
+                source: "vector".to_string(),
+                explanation: None,
+            })
+        })
+        .collect();
+
+    Ok(SearchPage {
+        items,
+        total,
+        limit,
+        offset,
+        has_more: offset + limit < total,
+    })
 }
 
 #[cfg(test)]
