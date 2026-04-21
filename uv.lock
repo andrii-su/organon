@@ -855,6 +855,7 @@ dependencies = [
     { name = "ollama" },
     { name = "pyarrow" },
     { name = "pypdf" },
+    { name = "ruff" },
 ]
 
 [package.dev-dependencies]
@@ -871,6 +872,7 @@ requires-dist = [
     { name = "ollama", specifier = ">=0.2" },
     { name = "pyarrow", specifier = ">=14.0" },
     { name = "pypdf", specifier = ">=4.0" },
+    { name = "ruff", specifier = ">=0.15.10" },
 ]
 
 [package.metadata.requires-dev]

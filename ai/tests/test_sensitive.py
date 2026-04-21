@@ -1,5 +1,4 @@
 """Tests for ai.common.sensitive — sensitive file detection."""
-import os
 import pytest
 
 from ai.common.sensitive import is_sensitive, sensitive_reason
