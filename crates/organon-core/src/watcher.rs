@@ -192,13 +192,11 @@ fn handle_event(
 ) {
     match event.kind {
         // ── native rename (Linux inotify Both) ───────────────────────────────
-        EventKind::Modify(ModifyKind::Name(RenameMode::Both)) => {
-            if event.paths.len() == 2 {
-                let old = &event.paths[0];
-                let new = &event.paths[1];
-                if !is_ignored_for_roots(roots, new) {
-                    do_rename(old, new, graph, use_git_timestamps);
-                }
+        EventKind::Modify(ModifyKind::Name(RenameMode::Both)) if event.paths.len() == 2 => {
+            let old = &event.paths[0];
+            let new = &event.paths[1];
+            if !is_ignored_for_roots(roots, new) {
+                do_rename(old, new, graph, use_git_timestamps);
             }
         }
 
