@@ -529,6 +529,14 @@ impl Graph {
             params![old_path],
         )?;
 
+        // ── cascade rename to history entries ─────────────────────────────────
+        // Update all prior history rows so get_history(new_path) returns the
+        // full timeline, not just post-rename entries.
+        self.conn.execute(
+            "UPDATE entity_history SET path = ?2 WHERE path = ?1",
+            params![old_path, new_path],
+        )?;
+
         // ── drop stale FTS entry (indexer re-adds under new path) ─────────────
         self.conn.execute(
             "DELETE FROM entities_fts WHERE path = ?1",
@@ -1043,5 +1051,60 @@ mod tests {
         g.upsert_relation("/a.rs", "/b.rs", "imports").unwrap();
         assert_eq!(g.entity_count().unwrap(), 2);
         assert_eq!(g.relation_count().unwrap(), 1);
+    }
+
+    // ── rename history continuity ─────────────────────────────────────────────
+
+    #[test]
+    fn rename_preserves_history_under_new_path() {
+        let (g, _f) = tmp_graph();
+        // Insert entity and let upsert record an initial history entry.
+        g.upsert(&mk_entity("/old.rs")).unwrap();
+
+        // Confirm history exists under old path.
+        let before = g.get_history("/old.rs", 50).unwrap();
+        assert!(!before.is_empty(), "upsert should record at least one history entry");
+
+        // Rename.
+        g.rename_entity("/old.rs", "/new.rs").unwrap();
+
+        // History under old path should be empty.
+        let old_hist = g.get_history("/old.rs", 50).unwrap();
+        assert!(old_hist.is_empty(), "old path should have no history after rename");
+
+        // History under new path should include pre-rename entries + the rename event.
+        let new_hist = g.get_history("/new.rs", 50).unwrap();
+        assert!(
+            new_hist.len() > before.len(),
+            "new path should have original entries plus the rename event; got {}",
+            new_hist.len()
+        );
+
+        // The most recent entry should be the rename event.
+        let rename_entry = new_hist.iter().find(|e| e.event == "renamed");
+        assert!(rename_entry.is_some(), "rename event should appear in history");
+        assert_eq!(
+            rename_entry.unwrap().old_path.as_deref(),
+            Some("/old.rs"),
+            "rename event should record old_path"
+        );
+    }
+
+    #[test]
+    fn rename_history_continuity_across_multiple_renames() {
+        let (g, _f) = tmp_graph();
+        g.upsert(&mk_entity("/a.rs")).unwrap();
+
+        g.rename_entity("/a.rs", "/b.rs").unwrap();
+        g.rename_entity("/b.rs", "/c.rs").unwrap();
+
+        // All history should accumulate under the final path.
+        let hist = g.get_history("/c.rs", 50).unwrap();
+        let rename_events: Vec<_> = hist.iter().filter(|e| e.event == "renamed").collect();
+        assert_eq!(rename_events.len(), 2, "should have two rename events");
+
+        // No history under old paths.
+        assert!(g.get_history("/a.rs", 50).unwrap().is_empty());
+        assert!(g.get_history("/b.rs", 50).unwrap().is_empty());
     }
 }
