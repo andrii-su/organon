@@ -1,3 +1,4 @@
+use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::PathBuf;
 use std::process::Command;
@@ -360,7 +361,7 @@ impl McpService {
             })
             .collect();
 
-        rows.sort_by(|a, b| b.accessed_at.cmp(&a.accessed_at));
+        rows.sort_by_key(|row| Reverse(row.accessed_at));
         rows.truncate(limit);
         Ok(rows)
     }
