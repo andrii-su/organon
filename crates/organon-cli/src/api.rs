@@ -19,9 +19,12 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tower_http::cors::{Any, CorsLayer};
 
+use axum::extract::Path as AxumPath;
+
 use crate::{
     python::python_run_with_env,
-    search::{default_search_mode, python_env, search_entities, SearchMode, SearchParams},
+    queries,
+    search::{default_search_mode, parse_query_expr, python_env, search_entities, SearchMode, SearchParams},
 };
 
 #[derive(Clone)]
@@ -143,7 +146,18 @@ struct ImpactResponse {
     path: String,
     depth: u8,
     total: usize,
+    direct_dependents: usize,
+    risk_level: String,
     entries: Vec<ImpactEntry>,
+}
+
+fn impact_risk_level(total: usize) -> &'static str {
+    match total {
+        0 => "none",
+        1..=3 => "low",
+        4..=10 => "medium",
+        _ => "high",
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -202,6 +216,8 @@ struct IndexResponse {
     indexed: usize,
     skipped: usize,
     errors: usize,
+    #[serde(default)]
+    sensitive_skipped: usize,
 }
 
 pub fn router(state: ApiState) -> Router {
@@ -219,6 +235,9 @@ pub fn router(state: ApiState) -> Router {
         .route("/search", get(search))
         .route("/clean", post(clean))
         .route("/index", post(index))
+        .route("/queries", get(list_queries))
+        .route("/queries/{name}", get(get_query).post(save_query).delete(delete_query))
+        .route("/queries/{name}/run", post(run_query))
         .layer(CorsLayer::new().allow_origin(Any).allow_methods(Any))
         .with_state(state)
 }
@@ -419,6 +438,66 @@ async fn openapi_json() -> Json<Value> {
                     }
                 }
             },
+            "/queries": {
+                "get": {
+                    "summary": "List all saved queries",
+                    "responses": {
+                        "200": json_response("Saved query list", json!({"type": "object"})),
+                        "500": error_response("Internal error")
+                    }
+                }
+            },
+            "/queries/{name}": {
+                "get": {
+                    "summary": "Get a saved query by name",
+                    "parameters": [
+                        json!({"name": "name", "in": "path", "required": true, "schema": {"type": "string"}})
+                    ],
+                    "responses": {
+                        "200": json_response("Saved query definition", ref_schema("SavedQuery")),
+                        "404": error_response("Not found"),
+                        "500": error_response("Internal error")
+                    }
+                },
+                "post": {
+                    "summary": "Save a named query",
+                    "parameters": [
+                        json!({"name": "name", "in": "path", "required": true, "schema": {"type": "string"}})
+                    ],
+                    "requestBody": {
+                        "required": true,
+                        "content": { "application/json": { "schema": ref_schema("SavedQuery") } }
+                    },
+                    "responses": {
+                        "200": json_response("Saved", json!({"type": "object"})),
+                        "500": error_response("Internal error")
+                    }
+                },
+                "delete": {
+                    "summary": "Delete a saved query",
+                    "parameters": [
+                        json!({"name": "name", "in": "path", "required": true, "schema": {"type": "string"}})
+                    ],
+                    "responses": {
+                        "200": json_response("Deleted", json!({"type": "object"})),
+                        "404": error_response("Not found"),
+                        "500": error_response("Internal error")
+                    }
+                }
+            },
+            "/queries/{name}/run": {
+                "post": {
+                    "summary": "Run a saved query and return results",
+                    "parameters": [
+                        json!({"name": "name", "in": "path", "required": true, "schema": {"type": "string"}})
+                    ],
+                    "responses": {
+                        "200": json_response("Query results", json!({"type": "object"})),
+                        "404": error_response("Not found"),
+                        "500": error_response("Internal error")
+                    }
+                }
+            },
             "/index": {
                 "post": {
                     "summary": "Run indexer once",
@@ -553,12 +632,13 @@ async fn openapi_json() -> Json<Value> {
                 },
                 "IndexResponse": {
                     "type": "object",
-                    "required": ["total", "indexed", "skipped", "errors"],
+                    "required": ["total", "indexed", "skipped", "errors", "sensitive_skipped"],
                     "properties": {
                         "total": { "type": "integer", "minimum": 0 },
                         "indexed": { "type": "integer", "minimum": 0 },
                         "skipped": { "type": "integer", "minimum": 0 },
-                        "errors": { "type": "integer", "minimum": 0 }
+                        "errors": { "type": "integer", "minimum": 0 },
+                        "sensitive_skipped": { "type": "integer", "minimum": 0 }
                     }
                 },
                 "HistoryEntry": {
@@ -588,12 +668,30 @@ async fn openapi_json() -> Json<Value> {
                 },
                 "ImpactResponse": {
                     "type": "object",
-                    "required": ["path", "depth", "total", "entries"],
+                    "required": ["path", "depth", "total", "direct_dependents", "risk_level", "entries"],
                     "properties": {
                         "path": { "type": "string" },
                         "depth": { "type": "integer" },
                         "total": { "type": "integer", "minimum": 0 },
+                        "direct_dependents": { "type": "integer", "minimum": 0 },
+                        "risk_level": { "type": "string", "enum": ["none", "low", "medium", "high"] },
                         "entries": { "type": "array", "items": ref_schema("ImpactEntry") }
+                    }
+                },
+                "SavedQuery": {
+                    "type": "object",
+                    "required": ["kind", "limit"],
+                    "properties": {
+                        "kind": { "type": "string", "enum": ["find", "search"] },
+                        "query": { "type": ["string", "null"] },
+                        "mode": { "type": ["string", "null"], "enum": ["vector", "fts", "hybrid"] },
+                        "state": { "type": ["string", "null"] },
+                        "extension": { "type": ["string", "null"] },
+                        "created_after": { "type": ["string", "null"], "format": "date" },
+                        "modified_after": { "type": ["string", "null"], "format": "date" },
+                        "larger_than_mb": { "type": ["integer", "null"], "minimum": 0 },
+                        "limit": { "type": "integer", "minimum": 1, "default": 20 },
+                        "description": { "type": ["string", "null"] }
                     }
                 },
                 "DuplicateGroup": {
@@ -790,8 +888,12 @@ async fn get_impact(
     let result = tokio::task::spawn_blocking(move || -> Result<ImpactResponse> {
         let graph = open_graph(&db_path)?;
         let entries = graph.reverse_deps(&path, depth)?;
+        let direct_dependents = entries.iter().filter(|e| e.depth == 1).count();
+        let total = entries.len();
         Ok(ImpactResponse {
-            total: entries.len(),
+            total,
+            direct_dependents,
+            risk_level: impact_risk_level(total).to_string(),
             path,
             depth,
             entries,
@@ -894,14 +996,16 @@ async fn search(
     }
 
     let mode = query.mode.unwrap_or_else(|| default_search_mode(&config));
-    let q = query.q;
+    let pq = parse_query_expr(&query.q);
+    let q = if pq.free_text.is_empty() { query.q } else { pq.free_text };
+    // Explicit query params take precedence over inline tokens
     let metadata_filter = build_find_filter(FindFilterParams {
-        state: query.state,
-        extension: query.extension.or(query.ext),
-        created_after: query.created_after,
-        modified_after: query.modified_after,
+        state: query.state.or(pq.state),
+        extension: query.extension.or(query.ext).or(pq.extension),
+        created_after: query.created_after.or(pq.created_after),
+        modified_after: query.modified_after.or(pq.modified_after),
         modified_within_days: None,
-        larger_than_mb: None,
+        larger_than_mb: pq.larger_than_mb,
         limit,
         offset,
     })?;
@@ -1029,6 +1133,122 @@ async fn index(
         )?;
 
         Ok(serde_json::from_str(&output)?)
+    })
+    .await
+    .map_err(|e| ApiError::internal(anyhow!(e)))??;
+
+    Ok(Json(result))
+}
+
+async fn list_queries() -> ApiResult<Json<serde_json::Value>> {
+    let store = tokio::task::spawn_blocking(queries::load)
+        .await
+        .map_err(|e| ApiError::internal(anyhow!(e)))??;
+    let list: Vec<serde_json::Value> = store
+        .iter()
+        .map(|(name, sq)| {
+            let mut v = serde_json::to_value(sq).unwrap_or(serde_json::Value::Null);
+            if let serde_json::Value::Object(ref mut m) = v {
+                m.insert("name".to_string(), serde_json::Value::String(name.clone()));
+            }
+            v
+        })
+        .collect();
+    Ok(Json(serde_json::json!({ "queries": list, "total": list.len() })))
+}
+
+async fn get_query(AxumPath(name): AxumPath<String>) -> ApiResult<Json<serde_json::Value>> {
+    let sq = tokio::task::spawn_blocking(move || queries::get(&name))
+        .await
+        .map_err(|e| ApiError::internal(anyhow!(e)))??;
+    Ok(Json(serde_json::to_value(sq).unwrap_or(serde_json::Value::Null)))
+}
+
+async fn save_query(
+    AxumPath(name): AxumPath<String>,
+    Json(body): Json<queries::SavedQuery>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let sq = queries::SavedQuery {
+        created_at: queries::now_ts(),
+        ..body
+    };
+    let name_clone = name.clone();
+    tokio::task::spawn_blocking(move || queries::insert(&name_clone, sq))
+        .await
+        .map_err(|e| ApiError::internal(anyhow!(e)))??;
+    Ok(Json(serde_json::json!({ "saved": name })))
+}
+
+async fn delete_query(AxumPath(name): AxumPath<String>) -> ApiResult<Json<serde_json::Value>> {
+    let name_clone = name.clone();
+    tokio::task::spawn_blocking(move || queries::remove(&name_clone))
+        .await
+        .map_err(|e| ApiError::internal(anyhow!(e)))??;
+    Ok(Json(serde_json::json!({ "deleted": name })))
+}
+
+async fn run_query(
+    State(state): State<ApiState>,
+    AxumPath(name): AxumPath<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let sq = tokio::task::spawn_blocking(move || queries::get(&name))
+        .await
+        .map_err(|e| ApiError::internal(anyhow!(e)))??;
+
+    let db_path = state.db_path.clone();
+    let config = state.config.clone();
+
+    let result = tokio::task::spawn_blocking(move || -> Result<serde_json::Value> {
+        match sq.kind.as_str() {
+            "find" => {
+                let graph = open_graph(&db_path)?;
+                let filter = build_find_filter(FindFilterParams {
+                    state: sq.state,
+                    extension: sq.extension,
+                    created_after: sq.created_after,
+                    modified_after: sq.modified_after,
+                    modified_within_days: None,
+                    larger_than_mb: sq.larger_than_mb,
+                    limit: sq.limit,
+                    offset: 0,
+                })?;
+                let items = graph.find(&filter)?;
+                Ok(serde_json::json!({ "kind": "find", "items": items, "total": items.len() }))
+            }
+            "search" => {
+                let query_str = sq.query.as_deref().unwrap_or("");
+                let mode = sq.mode.as_deref().and_then(|m| match m {
+                    "vector" => Some(SearchMode::Vector),
+                    "fts" => Some(SearchMode::Fts),
+                    "hybrid" => Some(SearchMode::Hybrid),
+                    _ => None,
+                }).unwrap_or_else(|| default_search_mode(&config));
+                let limit = sq.limit;
+                let filter = build_find_filter(FindFilterParams {
+                    state: sq.state,
+                    extension: sq.extension,
+                    created_after: sq.created_after,
+                    modified_after: sq.modified_after,
+                    modified_within_days: None,
+                    larger_than_mb: sq.larger_than_mb,
+                    limit,
+                    offset: 0,
+                })?;
+                let page = search_entities(SearchParams {
+                    query: query_str,
+                    limit,
+                    offset: 0,
+                    dir: None,
+                    mode,
+                    metadata_filter: &filter,
+                    config: &config,
+                    db_path: &db_path,
+                    explain: false,
+                })?;
+                Ok(serde_json::json!({ "kind": "search", "items": page.items, "total": page.total }))
+            }
+            other => anyhow::bail!("unknown query kind '{other}'"),
+        }
     })
     .await
     .map_err(|e| ApiError::internal(anyhow!(e)))??;

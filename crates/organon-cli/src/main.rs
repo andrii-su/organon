@@ -861,6 +861,12 @@ fn cmd_search(
 ) -> Result<()> {
     // Parse inline field tokens out of the query (e.g. "state:dormant ext:rs auth")
     let pq = parse_query_expr(query);
+    if pq.has_filters() {
+        debug!(
+            "query parse: free_text={:?} state={:?} ext={:?} modified_after={:?} created_after={:?} size>{:?}MB",
+            pq.free_text, pq.state, pq.extension, pq.modified_after, pq.created_after, pq.larger_than_mb
+        );
+    }
     let effective_query = if pq.free_text.is_empty() && pq.has_filters() {
         // All tokens were field filters — run as find
         return cmd_find(
@@ -1649,6 +1655,15 @@ fn cmd_search_like(
     Ok(())
 }
 
+fn impact_risk_level(total: usize) -> &'static str {
+    match total {
+        0 => "none",
+        1..=3 => "low",
+        4..=10 => "medium",
+        _ => "high",
+    }
+}
+
 fn cmd_impact(path: &PathBuf, depth: u8, json: bool, db_path: &Path) -> Result<()> {
     let graph = open_graph(db_path)?;
     let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.clone());
@@ -1662,26 +1677,38 @@ fn cmd_impact(path: &PathBuf, depth: u8, json: bool, db_path: &Path) -> Result<(
             path: &'a str,
             depth: u8,
             total: usize,
+            direct_dependents: usize,
+            risk_level: &'static str,
             entries: &'a [ImpactEntry],
         }
+        let direct = entries.iter().filter(|e| e.depth == 1).count();
         println!(
             "{}",
             serde_json::to_string_pretty(&ImpactReport {
                 path: &path_str,
                 depth,
                 total: entries.len(),
+                direct_dependents: direct,
+                risk_level: impact_risk_level(entries.len()),
                 entries: &entries,
             })?
         );
         return Ok(());
     }
 
+    let direct = entries.iter().filter(|e| e.depth == 1).count();
+    let risk = impact_risk_level(entries.len());
+
     println!("impact: {path_str}");
     if entries.is_empty() {
-        println!("  (no dependents found up to depth {depth})");
+        println!("  risk: {risk} — no dependents found up to depth {depth}");
         return Ok(());
     }
-    println!("  {} dependent(s) within depth {depth}\n", entries.len());
+    println!(
+        "  risk: {risk} — {} total dependent(s), {} direct (depth 1), max depth {depth}\n",
+        entries.len(),
+        direct,
+    );
     println!("{:<5}  {:<10}  PATH", "DEPTH", "KIND");
     println!("{}", "-".repeat(80));
     for e in &entries {
@@ -2249,5 +2276,47 @@ mod tests {
 
         let empty = resolve_watch_roots(None, &OrgConfig::default()).unwrap();
         assert_eq!(empty.len(), 1);
+    }
+
+    // ── doctor ────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn doctor_parses_as_subcommand() {
+        let cli = Cli::try_parse_from(["organon", "doctor"]).unwrap();
+        assert!(matches!(cli.command, Cmd::Doctor));
+    }
+
+    #[test]
+    fn doctor_healthy_state_does_not_error() {
+        let db_file = NamedTempFile::new().unwrap();
+        let db_path = db_file.path();
+        // Create a real graph so the DB is valid.
+        Graph::open(db_path.to_str().unwrap()).unwrap();
+        let config = OrgConfig::default();
+        // Should return Ok even when Python/ollama are unavailable.
+        let result = cmd_doctor(db_path, &config);
+        assert!(result.is_ok(), "cmd_doctor returned Err: {result:?}");
+    }
+
+    #[test]
+    fn doctor_degraded_state_does_not_panic() {
+        let config = OrgConfig::default();
+        // Point at nonexistent DB — doctor should report issues but not panic/err.
+        let missing = std::path::Path::new("/tmp/organon_test_missing_db_never_exists.db");
+        let result = cmd_doctor(missing, &config);
+        assert!(result.is_ok(), "doctor should return Ok even with degraded state");
+    }
+
+    // ── impact risk level ─────────────────────────────────────────────────────
+
+    #[test]
+    fn impact_risk_level_thresholds() {
+        assert_eq!(impact_risk_level(0), "none");
+        assert_eq!(impact_risk_level(1), "low");
+        assert_eq!(impact_risk_level(3), "low");
+        assert_eq!(impact_risk_level(4), "medium");
+        assert_eq!(impact_risk_level(10), "medium");
+        assert_eq!(impact_risk_level(11), "high");
+        assert_eq!(impact_risk_level(100), "high");
     }
 }

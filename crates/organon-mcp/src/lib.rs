@@ -265,8 +265,38 @@ pub struct ImpactResponse {
     pub path: String,
     pub depth: u8,
     pub total: usize,
+    pub direct_dependents: usize,
+    /// "none" | "low" | "medium" | "high" based on total reverse-dep count.
+    pub risk_level: String,
     /// Impact entries, sorted by depth then path. Fields: path, kind, depth.
     pub entries: Vec<serde_json::Value>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ListSavedQueriesRequest {
+    // No parameters — returns all saved queries.
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ListSavedQueriesResponse {
+    /// All saved queries. Each entry includes all definition fields plus "name".
+    pub queries: Vec<serde_json::Value>,
+    pub total: usize,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct RunSavedQueryRequest {
+    /// Name of the saved query to run.
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct RunSavedQueryResponse {
+    /// "find" or "search" — the kind of query that was run.
+    pub kind: String,
+    /// Result items. For find: entity objects. For search: search hit objects.
+    pub items: Vec<serde_json::Value>,
+    pub total: usize,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -375,17 +405,102 @@ impl McpService {
 
     pub fn get_impact(&self, path: &str, depth: u8) -> Result<ImpactResponse> {
         let entries = self.open_graph()?.reverse_deps(path, depth)?;
+        let direct_dependents = entries.iter().filter(|e| e.depth == 1).count();
         let total = entries.len();
+        let risk_level = match total {
+            0 => "none",
+            1..=3 => "low",
+            4..=10 => "medium",
+            _ => "high",
+        }.to_string();
         let entries_json = entries
             .into_iter()
             .map(|e| serde_json::to_value(e).unwrap_or(serde_json::Value::Null))
             .collect();
         Ok(ImpactResponse {
             total,
+            direct_dependents,
+            risk_level,
             path: path.to_string(),
             depth,
             entries: entries_json,
         })
+    }
+
+    pub fn list_saved_queries(&self) -> Result<ListSavedQueriesResponse> {
+        let path = self.saved_queries_path();
+        if !path.exists() {
+            return Ok(ListSavedQueriesResponse { queries: vec![], total: 0 });
+        }
+        let text = std::fs::read_to_string(&path)?;
+        let store: serde_json::Value = serde_json::from_str(&text)?;
+        let queries: Vec<serde_json::Value> = store
+            .as_object()
+            .map(|m| {
+                m.iter()
+                    .map(|(name, val)| {
+                        let mut v = val.clone();
+                        if let serde_json::Value::Object(ref mut obj) = v {
+                            obj.insert("name".to_string(), serde_json::Value::String(name.clone()));
+                        }
+                        v
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let total = queries.len();
+        Ok(ListSavedQueriesResponse { queries, total })
+    }
+
+    pub fn run_saved_query(&self, name: &str) -> Result<RunSavedQueryResponse> {
+        let path = self.saved_queries_path();
+        if !path.exists() {
+            bail!("no saved queries file found");
+        }
+        let text = std::fs::read_to_string(&path)?;
+        let store: serde_json::Map<String, serde_json::Value> = serde_json::from_str(&text)?;
+        let sq = store
+            .get(name)
+            .ok_or_else(|| anyhow::anyhow!("no saved query named '{name}'"))?;
+
+        let kind = sq["kind"].as_str().unwrap_or("find");
+        let limit = sq.get("limit").and_then(|v| v.as_u64()).unwrap_or(20) as usize;
+
+        match kind {
+            "find" => {
+                let state = sq.get("state").and_then(|v| v.as_str()).map(str::to_string);
+                let extension = sq.get("extension").and_then(|v| v.as_str()).map(str::to_string);
+                let filter = build_find_filter(state, extension, None, None, limit)?;
+                let graph = self.open_graph()?;
+                let items: Vec<serde_json::Value> = graph
+                    .find(&filter)?
+                    .into_iter()
+                    .filter_map(|e| serde_json::to_value(e).ok())
+                    .collect();
+                let total = items.len();
+                Ok(RunSavedQueryResponse { kind: "find".to_string(), items, total })
+            }
+            "search" => {
+                let query_str = sq.get("query").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let mode_str = sq.get("mode").and_then(|v| v.as_str()).unwrap_or("vector");
+                let mode = match mode_str {
+                    "fts" => SearchMode::Fts,
+                    "hybrid" => SearchMode::Hybrid,
+                    _ => SearchMode::Vector,
+                };
+                let state = sq.get("state").and_then(|v| v.as_str()).map(str::to_string);
+                let extension = sq.get("extension").and_then(|v| v.as_str()).map(str::to_string);
+                let filter = build_find_filter(state, extension, None, None, limit)?;
+                let items: Vec<serde_json::Value> = self
+                    .search_files(&query_str, limit, None, mode, &filter, false)?
+                    .into_iter()
+                    .filter_map(|h| serde_json::to_value(h).ok())
+                    .collect();
+                let total = items.len();
+                Ok(RunSavedQueryResponse { kind: "search".to_string(), items, total })
+            }
+            other => bail!("unknown query kind '{other}'"),
+        }
     }
 
     pub fn find_duplicates(
@@ -702,6 +817,15 @@ impl McpService {
         Graph::open(self.db_path.to_string_lossy().as_ref())
     }
 
+    fn saved_queries_path(&self) -> PathBuf {
+        std::env::var("ORGANON_QUERIES")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| {
+                let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+                PathBuf::from(format!("{home}/.organon/saved_queries.json"))
+            })
+    }
+
     fn python_run(&self, args: &[&str]) -> Result<String> {
         let mut cmd = Command::new(self.python_bin());
         cmd.args(args)
@@ -932,6 +1056,30 @@ impl OrganonMcpServer {
         self.service
             .search_similar(&req.path, req.limit.unwrap_or(10), req.path_prefix.as_deref())
             .map(|items| Json(SearchFilesResponse { items }))
+            .map_err(|e| e.to_string())
+    }
+
+    #[tool(description = "List all saved named queries (created with `organon query save`).")]
+    async fn list_saved_queries(
+        &self,
+        Parameters(_req): Parameters<ListSavedQueriesRequest>,
+    ) -> Result<Json<ListSavedQueriesResponse>, String> {
+        self.service
+            .list_saved_queries()
+            .map(Json)
+            .map_err(|e| e.to_string())
+    }
+
+    #[tool(
+        description = "Run a saved named query and return its results (find or search depending on how it was saved)."
+    )]
+    async fn run_saved_query(
+        &self,
+        Parameters(req): Parameters<RunSavedQueryRequest>,
+    ) -> Result<Json<RunSavedQueryResponse>, String> {
+        self.service
+            .run_saved_query(&req.name)
+            .map(Json)
             .map_err(|e| e.to_string())
     }
 }
