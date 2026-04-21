@@ -160,6 +160,109 @@ def get_all_entries(db_path: str | None = None) -> list[dict]:
         return []
 
 
+def search_by_path(
+    path: str,
+    limit: int = 10,
+    db_path: str | None = None,
+    path_prefix: str | None = None,
+) -> list[dict[str, Any]]:
+    """Find files similar to `path` using its existing vector embedding.
+
+    The file must already be indexed. Returns list of {path, score, text_preview},
+    excluding the query file itself.
+    """
+    logger.debug("search_by_path: %r limit=%d prefix=%r", path, limit, path_prefix)
+    table = _get_table(db_path)
+
+    path_escaped = path.replace("'", "''")
+    try:
+        rows = table.search().where(f"path = '{path_escaped}'").limit(1).to_list()
+    except Exception as e:
+        logger.warning("search_by_path: lookup failed for %s: %s", path, e)
+        return []
+
+    if not rows:
+        logger.info("search_by_path: path not indexed: %s", path)
+        return []
+
+    vector = rows[0]["vector"]
+    fetch_limit = limit * 4 if path_prefix else limit + 1
+    results = table.search(vector).limit(fetch_limit).to_list()
+
+    results = [r for r in results if r["path"] != path]
+    if path_prefix:
+        results = [r for r in results if r["path"].startswith(path_prefix)]
+
+    results = results[:limit]
+    logger.debug("search_by_path: %d results", len(results))
+    return [
+        {
+            "path": r["path"],
+            "score": float(1 - r.get("_distance", 0)),
+            "text_preview": r["text_preview"],
+        }
+        for r in results
+    ]
+
+
+def find_near_duplicates(
+    threshold: float = 0.95,
+    limit: int = 100,
+    db_path: str | None = None,
+) -> list[dict[str, Any]]:
+    """Find near-duplicate files by comparing vector embeddings.
+
+    For each indexed file, queries its top-5 nearest neighbours.
+    Returns unique pairs with similarity >= threshold, sorted by similarity desc.
+
+    Args:
+        threshold: Minimum cosine similarity (0–1) to be considered a near-duplicate.
+        limit: Maximum pairs to return.
+        db_path: Vector store path.
+    """
+    logger.debug("find_near_duplicates: threshold=%.3f limit=%d", threshold, limit)
+    table = _get_table(db_path)
+
+    try:
+        all_rows = (
+            table.search()
+            .select(["path", "vector"])
+            .limit(10_000)
+            .to_list()
+        )
+    except Exception as e:
+        logger.warning("find_near_duplicates: failed to fetch rows: %s", e)
+        return []
+
+    seen: set[tuple[str, str]] = set()
+    results: list[dict[str, Any]] = []
+
+    for row in all_rows:
+        if len(results) >= limit:
+            break
+        try:
+            neighbors = table.search(row["vector"]).limit(6).to_list()
+        except Exception:
+            continue
+        for n in neighbors:
+            if n["path"] == row["path"]:
+                continue
+            sim = float(1 - n.get("_distance", 1))
+            if sim < threshold:
+                continue
+            key = tuple(sorted([row["path"], n["path"]]))
+            if key in seen:
+                continue
+            seen.add(key)
+            results.append({"file1": key[0], "file2": key[1], "similarity": sim})
+            if len(results) >= limit:
+                break
+
+    results.sort(key=lambda x: -x["similarity"])
+    logger.debug("find_near_duplicates: %d pairs found", len(results))
+    return results
+
+
 def update_path_in_store(old_path: str, new_path: str, db_path: str | None = None) -> bool:
     """Update the path field for a lancedb row whose path == old_path.
 

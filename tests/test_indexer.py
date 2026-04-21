@@ -6,7 +6,6 @@ import pytest
 
 from ai.indexer import get_entities, reconcile_lancedb_paths, run_once, summarize_file
 
-
 # ── fixtures ──────────────────────────────────────────────────────────────────
 
 @pytest.fixture
@@ -199,7 +198,7 @@ def test_run_once_returns_all_stat_keys(tmp_db):
     ):
         stats = run_once(tmp_db)
 
-    assert {"total", "indexed", "skipped", "errors"} == set(stats.keys())
+    assert {"total", "indexed", "skipped", "errors", "sensitive_skipped"} == set(stats.keys())
 
 
 def test_run_once_updates_fts(tmp_db):

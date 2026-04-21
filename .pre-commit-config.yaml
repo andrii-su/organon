@@ -1,0 +1,30 @@
+repos:
+  - repo: local
+    hooks:
+      - id: ruff-check-fix
+        name: ruff check --fix (ai)
+        entry: uv run --group dev ruff check ai --fix
+        language: system
+        pass_filenames: false
+        files: ^ai/.*\.py$
+
+      - id: ruff-format
+        name: ruff format (ai)
+        entry: uv run --group dev ruff format ai
+        language: system
+        pass_filenames: false
+        files: ^ai/.*\.py$
+
+      - id: rustfmt
+        name: rustfmt (workspace)
+        entry: cargo fmt --all
+        language: system
+        pass_filenames: false
+        files: \.rs$
+
+      - id: clippy-fix
+        name: clippy --fix (workspace)
+        entry: cargo clippy --workspace --all-targets --all-features --fix --allow-dirty --allow-staged -- -D warnings
+        language: system
+        pass_filenames: false
+        files: \.rs$

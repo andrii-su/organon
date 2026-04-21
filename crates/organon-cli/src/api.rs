@@ -12,16 +12,22 @@ use axum::{
 use chrono::NaiveDate;
 use organon_core::{
     config::OrgConfig,
-    graph::{FindFilter, Graph},
+    graph::{DuplicateGroup, FindFilter, Graph, HistoryEntry, ImpactEntry},
     scanner,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tower_http::cors::{Any, CorsLayer};
 
+use axum::extract::Path as AxumPath;
+
 use crate::{
     python::python_run_with_env,
-    search::{default_search_mode, python_env, search_entities, SearchMode, SearchParams},
+    queries,
+    search::{
+        default_search_mode, parse_query_expr, python_env, search_entities, SearchMode,
+        SearchParams,
+    },
 };
 
 #[derive(Clone)]
@@ -93,7 +99,10 @@ struct PathQuery {
 
 #[derive(Debug, Deserialize)]
 struct SearchQuery {
+    #[serde(default)]
     q: String,
+    /// Find files similar to this file (mutually exclusive with q)
+    like: Option<String>,
     limit: Option<usize>,
     offset: Option<usize>,
     dir: Option<PathBuf>,
@@ -104,6 +113,61 @@ struct SearchQuery {
     created_after: Option<String>,
     modified_after: Option<String>,
     explain: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ImpactQuery {
+    path: String,
+    #[serde(default = "default_impact_depth")]
+    depth: u8,
+}
+
+fn default_impact_depth() -> u8 {
+    5
+}
+
+#[derive(Debug, Deserialize)]
+struct DuplicatesQuery {
+    #[serde(default)]
+    near: bool,
+    #[serde(default = "default_dup_threshold")]
+    threshold: f64,
+    #[serde(default = "default_dup_limit")]
+    limit: usize,
+}
+
+fn default_dup_threshold() -> f64 {
+    0.95
+}
+
+fn default_dup_limit() -> usize {
+    50
+}
+
+#[derive(Debug, Serialize)]
+struct ImpactResponse {
+    path: String,
+    depth: u8,
+    total: usize,
+    direct_dependents: usize,
+    risk_level: String,
+    entries: Vec<ImpactEntry>,
+}
+
+fn impact_risk_level(total: usize) -> &'static str {
+    match total {
+        0 => "none",
+        1..=3 => "low",
+        4..=10 => "medium",
+        _ => "high",
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct DuplicatesResponse {
+    exact: Vec<DuplicateGroup>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    near: Option<Vec<serde_json::Value>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -155,6 +219,8 @@ struct IndexResponse {
     indexed: usize,
     skipped: usize,
     errors: usize,
+    #[serde(default)]
+    sensitive_skipped: usize,
 }
 
 pub fn router(state: ApiState) -> Router {
@@ -165,10 +231,19 @@ pub fn router(state: ApiState) -> Router {
         .route("/stats", get(stats))
         .route("/entities", get(list_entities))
         .route("/entity", get(get_entity))
+        .route("/history", get(get_history))
+        .route("/impact", get(get_impact))
+        .route("/duplicates", get(get_duplicates))
         .route("/relations", get(get_relations))
         .route("/search", get(search))
         .route("/clean", post(clean))
         .route("/index", post(index))
+        .route("/queries", get(list_queries))
+        .route(
+            "/queries/{name}",
+            get(get_query).post(save_query).delete(delete_query),
+        )
+        .route("/queries/{name}/run", post(run_query))
         .layer(CorsLayer::new().allow_origin(Any).allow_methods(Any))
         .with_state(state)
 }
@@ -276,6 +351,46 @@ async fn openapi_json() -> Json<Value> {
                     }
                 }
             },
+            "/history": {
+                "get": {
+                    "summary": "Get lifecycle and change history for a file",
+                    "parameters": [
+                        query_param("path", "Absolute file path", true, json!({"type": "string"})),
+                        query_param("limit", "Max entries (default 20)", false, json!({"type": "integer", "minimum": 1, "default": 20}))
+                    ],
+                    "responses": {
+                        "200": json_response("History entries", json!({"type": "array", "items": ref_schema("HistoryEntry")})),
+                        "500": error_response("Internal error")
+                    }
+                }
+            },
+            "/impact": {
+                "get": {
+                    "summary": "Reverse dependency analysis — who depends on this file",
+                    "parameters": [
+                        query_param("path", "Absolute file path", true, json!({"type": "string"})),
+                        query_param("depth", "BFS depth (default 5)", false, json!({"type": "integer", "minimum": 1, "default": 5}))
+                    ],
+                    "responses": {
+                        "200": json_response("Impact report", ref_schema("ImpactResponse")),
+                        "500": error_response("Internal error")
+                    }
+                }
+            },
+            "/duplicates": {
+                "get": {
+                    "summary": "Find exact and near-duplicate files",
+                    "parameters": [
+                        query_param("near", "Also find near-duplicates via embeddings", false, json!({"type": "boolean", "default": false})),
+                        query_param("threshold", "Similarity threshold for near-duplicates", false, json!({"type": "number", "minimum": 0, "maximum": 1, "default": 0.95})),
+                        query_param("limit", "Max near-duplicate pairs", false, json!({"type": "integer", "minimum": 1, "default": 50}))
+                    ],
+                    "responses": {
+                        "200": json_response("Duplicate groups", ref_schema("DuplicatesResponse")),
+                        "500": error_response("Internal error")
+                    }
+                }
+            },
             "/relations": {
                 "get": {
                     "summary": "Get relations for path",
@@ -292,7 +407,8 @@ async fn openapi_json() -> Json<Value> {
                 "get": {
                     "summary": "Search entities with pagination",
                     "parameters": [
-                        query_param("q", "Search query", true, json!({"type": "string", "minLength": 1})),
+                        query_param("q", "Search query (mutually exclusive with like)", false, json!({"type": "string"})),
+                        query_param("like", "Find files similar to this file path (mutually exclusive with q)", false, json!({"type": "string"})),
                         query_param("limit", "Page size", false, json!({"type": "integer", "minimum": 1})),
                         query_param("offset", "Result offset", false, json!({"type": "integer", "minimum": 0, "default": 0})),
                         query_param("dir", "Optional directory prefix", false, json!({"type": "string"})),
@@ -324,6 +440,66 @@ async fn openapi_json() -> Json<Value> {
                     },
                     "responses": {
                         "200": json_response("Cleanup preview or result", ref_schema("CleanResponse")),
+                        "500": error_response("Internal error")
+                    }
+                }
+            },
+            "/queries": {
+                "get": {
+                    "summary": "List all saved queries",
+                    "responses": {
+                        "200": json_response("Saved query list", json!({"type": "object"})),
+                        "500": error_response("Internal error")
+                    }
+                }
+            },
+            "/queries/{name}": {
+                "get": {
+                    "summary": "Get a saved query by name",
+                    "parameters": [
+                        json!({"name": "name", "in": "path", "required": true, "schema": {"type": "string"}})
+                    ],
+                    "responses": {
+                        "200": json_response("Saved query definition", ref_schema("SavedQuery")),
+                        "404": error_response("Not found"),
+                        "500": error_response("Internal error")
+                    }
+                },
+                "post": {
+                    "summary": "Save a named query",
+                    "parameters": [
+                        json!({"name": "name", "in": "path", "required": true, "schema": {"type": "string"}})
+                    ],
+                    "requestBody": {
+                        "required": true,
+                        "content": { "application/json": { "schema": ref_schema("SavedQuery") } }
+                    },
+                    "responses": {
+                        "200": json_response("Saved", json!({"type": "object"})),
+                        "500": error_response("Internal error")
+                    }
+                },
+                "delete": {
+                    "summary": "Delete a saved query",
+                    "parameters": [
+                        json!({"name": "name", "in": "path", "required": true, "schema": {"type": "string"}})
+                    ],
+                    "responses": {
+                        "200": json_response("Deleted", json!({"type": "object"})),
+                        "404": error_response("Not found"),
+                        "500": error_response("Internal error")
+                    }
+                }
+            },
+            "/queries/{name}/run": {
+                "post": {
+                    "summary": "Run a saved query and return results",
+                    "parameters": [
+                        json!({"name": "name", "in": "path", "required": true, "schema": {"type": "string"}})
+                    ],
+                    "responses": {
+                        "200": json_response("Query results", json!({"type": "object"})),
+                        "404": error_response("Not found"),
                         "500": error_response("Internal error")
                     }
                 }
@@ -462,12 +638,82 @@ async fn openapi_json() -> Json<Value> {
                 },
                 "IndexResponse": {
                     "type": "object",
-                    "required": ["total", "indexed", "skipped", "errors"],
+                    "required": ["total", "indexed", "skipped", "errors", "sensitive_skipped"],
                     "properties": {
                         "total": { "type": "integer", "minimum": 0 },
                         "indexed": { "type": "integer", "minimum": 0 },
                         "skipped": { "type": "integer", "minimum": 0 },
-                        "errors": { "type": "integer", "minimum": 0 }
+                        "errors": { "type": "integer", "minimum": 0 },
+                        "sensitive_skipped": { "type": "integer", "minimum": 0 }
+                    }
+                },
+                "HistoryEntry": {
+                    "type": "object",
+                    "required": ["id", "entity_id", "path", "event", "recorded_at"],
+                    "properties": {
+                        "id": { "type": "integer" },
+                        "entity_id": { "type": "string" },
+                        "path": { "type": "string" },
+                        "event": { "type": "string", "enum": ["created", "modified", "lifecycle", "renamed", "deleted"] },
+                        "old_lifecycle": { "type": ["string", "null"] },
+                        "new_lifecycle": { "type": ["string", "null"] },
+                        "old_path": { "type": ["string", "null"] },
+                        "size_bytes": { "type": ["integer", "null"] },
+                        "content_hash": { "type": ["string", "null"] },
+                        "recorded_at": { "type": "integer" }
+                    }
+                },
+                "ImpactEntry": {
+                    "type": "object",
+                    "required": ["path", "kind", "depth"],
+                    "properties": {
+                        "path": { "type": "string" },
+                        "kind": { "type": "string" },
+                        "depth": { "type": "integer", "minimum": 1 }
+                    }
+                },
+                "ImpactResponse": {
+                    "type": "object",
+                    "required": ["path", "depth", "total", "direct_dependents", "risk_level", "entries"],
+                    "properties": {
+                        "path": { "type": "string" },
+                        "depth": { "type": "integer" },
+                        "total": { "type": "integer", "minimum": 0 },
+                        "direct_dependents": { "type": "integer", "minimum": 0 },
+                        "risk_level": { "type": "string", "enum": ["none", "low", "medium", "high"] },
+                        "entries": { "type": "array", "items": ref_schema("ImpactEntry") }
+                    }
+                },
+                "SavedQuery": {
+                    "type": "object",
+                    "required": ["kind", "limit"],
+                    "properties": {
+                        "kind": { "type": "string", "enum": ["find", "search"] },
+                        "query": { "type": ["string", "null"] },
+                        "mode": { "type": ["string", "null"], "enum": ["vector", "fts", "hybrid"] },
+                        "state": { "type": ["string", "null"] },
+                        "extension": { "type": ["string", "null"] },
+                        "created_after": { "type": ["string", "null"], "format": "date" },
+                        "modified_after": { "type": ["string", "null"], "format": "date" },
+                        "larger_than_mb": { "type": ["integer", "null"], "minimum": 0 },
+                        "limit": { "type": "integer", "minimum": 1, "default": 20 },
+                        "description": { "type": ["string", "null"] }
+                    }
+                },
+                "DuplicateGroup": {
+                    "type": "object",
+                    "required": ["content_hash", "paths"],
+                    "properties": {
+                        "content_hash": { "type": "string" },
+                        "paths": { "type": "array", "items": { "type": "string" } }
+                    }
+                },
+                "DuplicatesResponse": {
+                    "type": "object",
+                    "required": ["exact"],
+                    "properties": {
+                        "exact": { "type": "array", "items": ref_schema("DuplicateGroup") },
+                        "near": { "type": "array", "nullable": true }
                     }
                 }
             }
@@ -610,6 +856,103 @@ async fn get_entity(
     }
 }
 
+#[derive(Debug, Deserialize)]
+struct HistoryQuery {
+    path: String,
+    #[serde(default = "default_history_limit")]
+    limit: usize,
+}
+
+fn default_history_limit() -> usize {
+    20
+}
+
+async fn get_history(
+    State(state): State<ApiState>,
+    Query(query): Query<HistoryQuery>,
+) -> ApiResult<Json<Vec<HistoryEntry>>> {
+    let db_path = state.db_path.clone();
+    let path = query.path;
+    let limit = query.limit;
+    let result = tokio::task::spawn_blocking(move || -> Result<Vec<HistoryEntry>> {
+        let graph = open_graph(&db_path)?;
+        graph.get_history(&path, limit)
+    })
+    .await
+    .map_err(|e| ApiError::internal(anyhow!(e)))??;
+
+    Ok(Json(result))
+}
+
+async fn get_impact(
+    State(state): State<ApiState>,
+    Query(query): Query<ImpactQuery>,
+) -> ApiResult<Json<ImpactResponse>> {
+    let db_path = state.db_path.clone();
+    let path = query.path;
+    let depth = query.depth;
+    let result = tokio::task::spawn_blocking(move || -> Result<ImpactResponse> {
+        let graph = open_graph(&db_path)?;
+        let entries = graph.reverse_deps(&path, depth)?;
+        let direct_dependents = entries.iter().filter(|e| e.depth == 1).count();
+        let total = entries.len();
+        Ok(ImpactResponse {
+            total,
+            direct_dependents,
+            risk_level: impact_risk_level(total).to_string(),
+            path,
+            depth,
+            entries,
+        })
+    })
+    .await
+    .map_err(|e| ApiError::internal(anyhow!(e)))??;
+
+    Ok(Json(result))
+}
+
+async fn get_duplicates(
+    State(state): State<ApiState>,
+    Query(query): Query<DuplicatesQuery>,
+) -> ApiResult<Json<DuplicatesResponse>> {
+    let db_path = state.db_path.clone();
+    let config = state.config.clone();
+    let near = query.near;
+    let threshold = query.threshold;
+    let limit = query.limit;
+
+    let result = tokio::task::spawn_blocking(move || -> Result<DuplicatesResponse> {
+        let graph = open_graph(&db_path)?;
+        let exact = graph.exact_duplicates()?;
+
+        let near_pairs = if near {
+            let output = python_run_with_env(
+                &[
+                    "-c",
+                    &format!(
+                        "from ai.embeddings.store import find_near_duplicates; import json; \
+                         print(json.dumps(find_near_duplicates(threshold={threshold}, limit={limit}, db_path={:?})))",
+                        config.indexer.vectors_path,
+                    ),
+                ],
+                &python_env(&config),
+            )?;
+            Some(serde_json::from_str::<Vec<serde_json::Value>>(&output)?)
+        } else {
+            None
+        };
+
+        Ok(DuplicatesResponse {
+            exact,
+            near: near_pairs,
+        })
+    })
+    .await
+    .map_err(|e| ApiError::internal(anyhow!(e)))??;
+
+    Ok(Json(result))
+}
+
 async fn get_relations(
     State(state): State<ApiState>,
     Query(query): Query<PathQuery>,
@@ -635,24 +978,44 @@ async fn search(
     State(state): State<ApiState>,
     Query(query): Query<SearchQuery>,
 ) -> ApiResult<Json<crate::search::SearchPage>> {
-    if query.q.trim().is_empty() {
-        return Err(ApiError::bad_request("missing query parameter `q`"));
+    let has_q = !query.q.trim().is_empty();
+    let has_like = query.like.is_some();
+
+    if !has_q && !has_like {
+        return Err(ApiError::bad_request("provide `q` or `like`"));
     }
 
     let db_path = state.db_path.clone();
     let config = state.config.clone();
     let limit = query.limit.unwrap_or(config.search.default_limit);
     let offset = query.offset.unwrap_or(0);
-    let mode = query.mode.unwrap_or_else(|| default_search_mode(&config));
     let dir = query.dir;
-    let q = query.q;
+
+    if has_like {
+        let like_path = query.like.unwrap();
+        let result = tokio::task::spawn_blocking(move || {
+            crate::search::search_by_example(&like_path, limit, offset, dir.as_deref(), &config)
+        })
+        .await
+        .map_err(|e| ApiError::internal(anyhow!(e)))??;
+        return Ok(Json(result));
+    }
+
+    let mode = query.mode.unwrap_or_else(|| default_search_mode(&config));
+    let pq = parse_query_expr(&query.q);
+    let q = if pq.free_text.is_empty() {
+        query.q
+    } else {
+        pq.free_text
+    };
+    // Explicit query params take precedence over inline tokens
     let metadata_filter = build_find_filter(FindFilterParams {
-        state: query.state,
-        extension: query.extension.or(query.ext),
-        created_after: query.created_after,
-        modified_after: query.modified_after,
+        state: query.state.or(pq.state),
+        extension: query.extension.or(query.ext).or(pq.extension),
+        created_after: query.created_after.or(pq.created_after),
+        modified_after: query.modified_after.or(pq.modified_after),
         modified_within_days: None,
-        larger_than_mb: None,
+        larger_than_mb: pq.larger_than_mb,
         limit,
         offset,
     })?;
@@ -780,6 +1143,126 @@ async fn index(
         )?;
 
         Ok(serde_json::from_str(&output)?)
+    })
+    .await
+    .map_err(|e| ApiError::internal(anyhow!(e)))??;
+
+    Ok(Json(result))
+}
+
+async fn list_queries() -> ApiResult<Json<serde_json::Value>> {
+    let store = tokio::task::spawn_blocking(queries::load)
+        .await
+        .map_err(|e| ApiError::internal(anyhow!(e)))??;
+    let list: Vec<serde_json::Value> = store
+        .iter()
+        .map(|(name, sq)| {
+            let mut v = serde_json::to_value(sq).unwrap_or(serde_json::Value::Null);
+            if let serde_json::Value::Object(ref mut m) = v {
+                m.insert("name".to_string(), serde_json::Value::String(name.clone()));
+            }
+            v
+        })
+        .collect();
+    Ok(Json(
+        serde_json::json!({ "queries": list, "total": list.len() }),
+    ))
+}
+
+async fn get_query(AxumPath(name): AxumPath<String>) -> ApiResult<Json<serde_json::Value>> {
+    let sq = tokio::task::spawn_blocking(move || queries::get(&name))
+        .await
+        .map_err(|e| ApiError::internal(anyhow!(e)))??;
+    Ok(Json(
+        serde_json::to_value(sq).unwrap_or(serde_json::Value::Null),
+    ))
+}
+
+async fn save_query(
+    AxumPath(name): AxumPath<String>,
+    Json(body): Json<queries::SavedQuery>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let sq = queries::SavedQuery {
+        created_at: queries::now_ts(),
+        ..body
+    };
+    let name_clone = name.clone();
+    tokio::task::spawn_blocking(move || queries::insert(&name_clone, sq))
+        .await
+        .map_err(|e| ApiError::internal(anyhow!(e)))??;
+    Ok(Json(serde_json::json!({ "saved": name })))
+}
+
+async fn delete_query(AxumPath(name): AxumPath<String>) -> ApiResult<Json<serde_json::Value>> {
+    let name_clone = name.clone();
+    tokio::task::spawn_blocking(move || queries::remove(&name_clone))
+        .await
+        .map_err(|e| ApiError::internal(anyhow!(e)))??;
+    Ok(Json(serde_json::json!({ "deleted": name })))
+}
+
+async fn run_query(
+    State(state): State<ApiState>,
+    AxumPath(name): AxumPath<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let sq = tokio::task::spawn_blocking(move || queries::get(&name))
+        .await
+        .map_err(|e| ApiError::internal(anyhow!(e)))??;
+
+    let db_path = state.db_path.clone();
+    let config = state.config.clone();
+
+    let result = tokio::task::spawn_blocking(move || -> Result<serde_json::Value> {
+        match sq.kind.as_str() {
+            "find" => {
+                let graph = open_graph(&db_path)?;
+                let filter = build_find_filter(FindFilterParams {
+                    state: sq.state,
+                    extension: sq.extension,
+                    created_after: sq.created_after,
+                    modified_after: sq.modified_after,
+                    modified_within_days: None,
+                    larger_than_mb: sq.larger_than_mb,
+                    limit: sq.limit,
+                    offset: 0,
+                })?;
+                let items = graph.find(&filter)?;
+                Ok(serde_json::json!({ "kind": "find", "items": items, "total": items.len() }))
+            }
+            "search" => {
+                let query_str = sq.query.as_deref().unwrap_or("");
+                let mode = sq.mode.as_deref().and_then(|m| match m {
+                    "vector" => Some(SearchMode::Vector),
+                    "fts" => Some(SearchMode::Fts),
+                    "hybrid" => Some(SearchMode::Hybrid),
+                    _ => None,
+                }).unwrap_or_else(|| default_search_mode(&config));
+                let limit = sq.limit;
+                let filter = build_find_filter(FindFilterParams {
+                    state: sq.state,
+                    extension: sq.extension,
+                    created_after: sq.created_after,
+                    modified_after: sq.modified_after,
+                    modified_within_days: None,
+                    larger_than_mb: sq.larger_than_mb,
+                    limit,
+                    offset: 0,
+                })?;
+                let page = search_entities(SearchParams {
+                    query: query_str,
+                    limit,
+                    offset: 0,
+                    dir: None,
+                    mode,
+                    metadata_filter: &filter,
+                    config: &config,
+                    db_path: &db_path,
+                    explain: false,
+                })?;
+                Ok(serde_json::json!({ "kind": "search", "items": page.items, "total": page.total }))
+            }
+            other => anyhow::bail!("unknown query kind '{other}'"),
+        }
     })
     .await
     .map_err(|e| ApiError::internal(anyhow!(e)))??;

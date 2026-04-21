@@ -10,6 +10,7 @@ dependencies = [
     "pypdf>=4.0",
     "mcp>=1.0",
     "ollama>=0.2",
+    "ruff>=0.15.10",
 ]
 
 [project.scripts]
@@ -19,7 +20,6 @@ organon-mcp    = "ai.mcp_server.server:main"
 [dependency-groups]
 dev = [
     "pytest>=8.0",
-    "ruff>=0.4",
 ]
 
 [build-system]

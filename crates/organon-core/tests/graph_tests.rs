@@ -468,3 +468,109 @@ fn find_supports_offset_and_count() {
     assert_eq!(page.len(), 1);
     assert_eq!(total, 3);
 }
+
+// ── history tests ─────────────────────────────────────────────────────────────
+
+#[test]
+fn history_records_created_on_first_upsert() {
+    let (graph, _f) = temp_graph();
+    let entity = test_entity("/tmp/history_new.rs");
+    graph.upsert(&entity).unwrap();
+
+    let entries = graph.get_history("/tmp/history_new.rs", 10).unwrap();
+    assert_eq!(entries.len(), 1, "one 'created' entry expected");
+    assert_eq!(entries[0].event, "created");
+    assert_eq!(
+        entries[0].new_lifecycle.as_deref(),
+        Some(entity.lifecycle.as_str())
+    );
+}
+
+#[test]
+fn history_records_lifecycle_transition() {
+    let (graph, _f) = temp_graph();
+    let mut entity = test_entity("/tmp/lifecycle_test.rs");
+    entity.lifecycle = LifecycleState::Active;
+    graph.upsert(&entity).unwrap();
+
+    entity.lifecycle = LifecycleState::Dormant;
+    graph.upsert(&entity).unwrap();
+
+    let entries = graph.get_history("/tmp/lifecycle_test.rs", 20).unwrap();
+    let lifecycle_events: Vec<_> = entries.iter().filter(|e| e.event == "lifecycle").collect();
+    assert_eq!(lifecycle_events.len(), 1);
+    assert_eq!(lifecycle_events[0].old_lifecycle.as_deref(), Some("active"));
+    assert_eq!(
+        lifecycle_events[0].new_lifecycle.as_deref(),
+        Some("dormant")
+    );
+}
+
+#[test]
+fn history_records_content_change() {
+    let (graph, _f) = temp_graph();
+    let mut entity = test_entity("/tmp/content_change.rs");
+    entity.content_hash = Some("hash-v1".to_string());
+    graph.upsert(&entity).unwrap();
+
+    entity.content_hash = Some("hash-v2".to_string());
+    graph.upsert(&entity).unwrap();
+
+    let entries = graph.get_history("/tmp/content_change.rs", 20).unwrap();
+    let modified: Vec<_> = entries.iter().filter(|e| e.event == "modified").collect();
+    assert_eq!(modified.len(), 1);
+    assert_eq!(modified[0].content_hash.as_deref(), Some("hash-v2"));
+}
+
+#[test]
+fn history_records_delete() {
+    let (graph, _f) = temp_graph();
+    let entity = test_entity("/tmp/delete_me.rs");
+    graph.upsert(&entity).unwrap();
+    graph.delete_by_path("/tmp/delete_me.rs").unwrap();
+
+    let entries = graph.get_history("/tmp/delete_me.rs", 20).unwrap();
+    let deleted: Vec<_> = entries.iter().filter(|e| e.event == "deleted").collect();
+    assert_eq!(deleted.len(), 1);
+    assert_eq!(deleted[0].old_lifecycle.as_deref(), Some("active"));
+}
+
+#[test]
+fn history_records_rename() {
+    let (graph, _f) = temp_graph();
+    let entity = test_entity("/tmp/old_name.rs");
+    graph.upsert(&entity).unwrap();
+    graph
+        .rename_entity("/tmp/old_name.rs", "/tmp/new_name.rs")
+        .unwrap();
+
+    let entries = graph.get_history("/tmp/new_name.rs", 20).unwrap();
+    let renamed: Vec<_> = entries.iter().filter(|e| e.event == "renamed").collect();
+    assert_eq!(renamed.len(), 1);
+    assert_eq!(renamed[0].old_path.as_deref(), Some("/tmp/old_name.rs"));
+}
+
+#[test]
+fn history_empty_for_unknown_path() {
+    let (graph, _f) = temp_graph();
+    let entries = graph.get_history("/no/such/file.rs", 10).unwrap();
+    assert!(entries.is_empty());
+}
+
+#[test]
+fn history_limit_respected() {
+    let (graph, _f) = temp_graph();
+    let mut entity = test_entity("/tmp/many_events.rs");
+    entity.content_hash = Some("h0".to_string());
+    graph.upsert(&entity).unwrap();
+    // Create 5 more modified events by changing hash each time
+    for i in 1..=5 {
+        entity.content_hash = Some(format!("h{i}"));
+        graph.upsert(&entity).unwrap();
+    }
+
+    let all = graph.get_history("/tmp/many_events.rs", 100).unwrap();
+    let limited = graph.get_history("/tmp/many_events.rs", 3).unwrap();
+    assert!(all.len() > 3);
+    assert_eq!(limited.len(), 3);
+}
