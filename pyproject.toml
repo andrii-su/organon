@@ -10,7 +10,7 @@ dependencies = [
     "pypdf>=4.0",
     "mcp>=1.0",
     "ollama>=0.2",
-    "ruff>=0.15.10",
+    "ruff>=0.15.12",
 ]
 
 [project.scripts]
