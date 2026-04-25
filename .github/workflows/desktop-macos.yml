@@ -65,7 +65,7 @@ jobs:
         run: npx tauri build --bundles app --no-sign
 
       - name: Upload macOS app artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: organon-desktop-macos-app
           path: |
