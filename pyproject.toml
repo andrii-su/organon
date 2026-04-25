@@ -6,7 +6,7 @@ requires-python = ">=3.11"
 dependencies = [
     "fastembed>=0.3",
     "lancedb>=0.6",
-    "pyarrow>=14.0",
+    "pyarrow>=24.0.0",
     "pypdf>=4.0",
     "mcp>=1.0",
     "ollama>=0.2",
