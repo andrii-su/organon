@@ -9,7 +9,7 @@ dependencies = [
     "pyarrow>=24.0.0",
     "pypdf>=4.0",
     "mcp>=1.0",
-    "ollama>=0.2",
+    "ollama>=0.6.2",
     "ruff>=0.15.12",
 ]
 
