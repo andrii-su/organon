@@ -26,6 +26,7 @@
                     <a href="#architecture">Architecture</a>
                     <a href="#cli">CLI</a>
                     <a href="#stack">Stack</a>
+                    <a href="https://github.com/andrii-su/organon/blob/main/docs/agent-usage.md">Docs</a>
                     <a href="https://github.com/andrii-su/organon">GitHub</a>
                 </nav>
             </div>
@@ -59,8 +60,8 @@
                         >
                         <a
                             class="button secondary"
-                            href="#cli"
-                            >Explore CLI</a
+                            href="https://github.com/andrii-su/organon/blob/main/docs/claude-desktop.md"
+                            >Connect an agent</a
                         >
                     </div>
                 </article>
@@ -118,7 +119,7 @@
                             <div class="feature-label">Semantic Search</div>
                             <h3>Find by meaning, not name</h3>
                             <p>
-                                Vector search via fastembed + LanceDB. Full-text via Tantivy.
+                                Vector search via fastembed + LanceDB. Full-text via SQLite FTS5.
                                 Hybrid mode combines both with metadata filters.
                             </p>
                         </article>
@@ -209,17 +210,17 @@
                     <div class="arch-step">
                         <div class="arch-num">Layer 01</div>
                         <h3>organon-core</h3>
-                        <p>Rust daemon. Filesystem watcher via <code>notify</code>. Entity graph in SQLite. FTS via Tantivy. Lifecycle state machine.</p>
+                        <p>Rust library. Filesystem watcher via <code>notify</code>. Entity graph in SQLite. Full-text search via SQLite FTS5. Lifecycle state machine.</p>
                     </div>
                     <div class="arch-step">
                         <div class="arch-num">Layer 02</div>
                         <h3>ai/ extractor + embeddings</h3>
-                        <p>Python. Content extraction for text, PDF, code. Local semantic vectors via fastembed + LanceDB. Summaries via Ollama.</p>
+                        <p>Python. Content extraction for text, PDF, and code. Local semantic vectors via fastembed + LanceDB.</p>
                     </div>
                     <div class="arch-step">
                         <div class="arch-num">Layer 03</div>
                         <h3>organon-mcp + cli</h3>
-                        <p>MCP server exposing search, query, and relate tools to agents. CLI for power users: find, graph, diff, export.</p>
+                        <p>Rust-native MCP server exposing search, graph, context, and impact tools to agents. The <code>organon</code> CLI for power users: watch, find, graph, diff, export.</p>
                     </div>
                 </div>
             </section>
@@ -237,34 +238,45 @@
                         <code>-v</code>, <code>-vv</code>.
                     </p>
                     <div class="code">
-                        <pre><span class="cmt"># Watch roots for filesystem changes</span>
+                        <pre><span class="cmt"># Watch a directory and index changes (runs the embedder too)</span>
 organon watch .
+
+<span class="cmt"># Start the MCP server for Claude Desktop, Cursor, or any MCP agent</span>
+organon mcp                 <span class="cmt"># stdio mode</span>
+organon mcp --sse           <span class="cmt"># HTTP / SSE mode</span>
+organon mcp --scope ./src   <span class="cmt"># limit a session to a subtree</span>
 
 <span class="cmt"># Find entities with metadata filters</span>
 organon find --state active --ext rs
 organon find --modified-after 2026-01-01 --larger-than-mb 10
-organon find --created-after 2026-01-01
 
 <span class="cmt"># Semantic + full-text search with filters</span>
 organon search "watcher" --state active --ext rs --mode hybrid
-organon search "sqlite graph" --modified-after 2026-01-01
 organon search "embedding model" --mode vector
+organon search --like src/auth.rs --limit 5
+
+<span class="cmt"># Agent helpers — context packs, impact, change plans, tests</span>
+organon context "auth refactor" --scope . --budget 8000
+organon impact src/auth.rs --depth 3
+organon plan "add health command" --file src/main.rs
+organon related-tests src/auth.rs
 
 <span class="cmt"># Graph relationships — text, DOT, or Mermaid output</span>
-organon graph path/to/file.rs --depth 2 --format text
-organon graph path/to/file.rs --format dot
-organon graph path/to/file.rs --format mermaid
+organon graph path/to/file.rs --depth 2 --format mermaid
 
-<span class="cmt"># Diff filesystem vs DB, export data</span>
-organon diff .
+<span class="cmt"># Inspect, diff, export, and check health</span>
+organon status path/to/file.rs
 organon diff . --json
 organon export --format json
-organon export --format csv --output entities.csv
-organon export --format dot --output graph.dot
-
-<span class="cmt"># Recompute summary for one entity</span>
-organon summarize path/to/file.rs --model llama3.2</pre>
+organon health
+organon doctor</pre>
                     </div>
+                    <p class="note">
+                        Connect an agent with the step-by-step guides:
+                        <a href="https://github.com/andrii-su/organon/blob/main/docs/claude-desktop.md">Claude Desktop</a>,
+                        <a href="https://github.com/andrii-su/organon/blob/main/docs/cursor.md">Cursor</a>,
+                        or the general <a href="https://github.com/andrii-su/organon/blob/main/docs/agent-usage.md">agent usage</a> reference.
+                    </p>
                 </div>
             </section>
 
@@ -289,8 +301,8 @@ organon summarize path/to/file.rs --model llama3.2</pre>
                             </thead>
                             <tbody>
                                 <tr>
-                                    <td>Core daemon</td>
-                                    <td><code>Rust</code> — notify · tokio · rusqlite · tantivy</td>
+                                    <td>Core library</td>
+                                    <td><code>Rust</code> — notify · tokio · rusqlite (FTS5)</td>
                                 </tr>
                                 <tr>
                                     <td>Semantic vectors</td>
@@ -298,23 +310,19 @@ organon summarize path/to/file.rs --model llama3.2</pre>
                                 </tr>
                                 <tr>
                                     <td>Content extraction</td>
-                                    <td><code>Python</code> — text · PDF · code · images</td>
-                                </tr>
-                                <tr>
-                                    <td>Local LLM</td>
-                                    <td><code>ollama</code> — summaries via any local model</td>
+                                    <td><code>Python</code> — text · PDF · code</td>
                                 </tr>
                                 <tr>
                                     <td>Agent protocol</td>
-                                    <td><code>MCP</code> — Model Context Protocol</td>
+                                    <td><code>MCP</code> — Rust-native, Model Context Protocol</td>
+                                </tr>
+                                <tr>
+                                    <td>CLI</td>
+                                    <td><code>organon</code> — watch · search · graph · context · plan</td>
                                 </tr>
                                 <tr>
                                     <td>Storage</td>
                                     <td><code>SQLite + LanceDB</code> — 100% on-disk</td>
-                                </tr>
-                                <tr>
-                                    <td>Future UI</td>
-                                    <td><code>Tauri</code> — macOS menu bar app</td>
                                 </tr>
                             </tbody>
                         </table>

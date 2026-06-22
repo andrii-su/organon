@@ -4,7 +4,7 @@ from unittest.mock import patch
 
 import pytest
 
-from ai.indexer import get_entities, reconcile_lancedb_paths, run_once, summarize_file
+from ai.indexer import get_entities, health_line, reconcile_lancedb_paths, run_once
 
 # ── fixtures ──────────────────────────────────────────────────────────────────
 
@@ -40,6 +40,13 @@ def tmp_db(tmp_path):
     return db
 
 
+def test_health_line_reports_indexer_ok():
+    health = health_line()
+    assert health.startswith("organon-indexer ")
+    assert " ok " in health
+    assert "python " in health
+
+
 # ── get_entities ──────────────────────────────────────────────────────────────
 
 def test_get_entities_excludes_dead(tmp_db):
@@ -59,6 +66,21 @@ def test_get_entities_returns_active(tmp_db):
     paths = [e["path"] for e in entities]
     assert "/src/main.py" in paths
     assert "/src/utils.py" in paths
+
+
+def test_get_entities_scopes_to_path_prefix(tmp_db):
+    conn = sqlite3.connect(str(tmp_db))
+    conn.execute(
+        "INSERT INTO entities VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        ("5", "/other/app.py", "app.py", ".py", 100, 0, 0, 0, "active", "hash_other", None),
+    )
+    conn.commit()
+    conn.close()
+
+    entities = get_entities(tmp_db, path_prefixes=["/src"])
+    paths = {e["path"] for e in entities}
+
+    assert paths == {"/src/main.py", "/src/utils.py"}
 
 
 # ── run_once ──────────────────────────────────────────────────────────────────
@@ -235,42 +257,27 @@ def test_run_once_backfills_fts_when_vectors_already_exist(tmp_db):
     assert stats["indexed"] == 0
 
 
-def test_run_once_stores_summary_when_enabled(tmp_db):
+def test_run_once_scopes_to_path_prefix(tmp_db):
+    conn = sqlite3.connect(str(tmp_db))
+    conn.execute(
+        "INSERT INTO entities VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        ("5", "/other/app.py", "app.py", ".py", 100, 0, 0, 0, "active", "hash_other", None),
+    )
+    conn.commit()
+    conn.close()
+
     with (
         patch("ai.indexer.extract_text", return_value="content"),
-        patch("ai.indexer.index_file"),
+        patch("ai.indexer.index_file") as mock_index,
         patch("ai.indexer.get_indexed_hashes", return_value=set()),
-        patch("ai.indexer.summarize_text", return_value="Short summary"),
         patch("ai.indexer.extract_relations", return_value=[]),
         patch("ai.indexer.upsert_relations"),
     ):
-        run_once(tmp_db, summarize=True, ollama_model="test-model")
+        stats = run_once(tmp_db, path_prefixes=["/src"])
 
-    conn = sqlite3.connect(str(tmp_db))
-    summaries = conn.execute(
-        "SELECT DISTINCT summary FROM entities "
-        "WHERE lifecycle = 'active' AND content_hash IS NOT NULL"
-    ).fetchall()
-    conn.close()
-    assert summaries == [("Short summary",)]
-
-
-def test_summarize_file_recomputes_and_stores_summary(tmp_db):
-    with (
-        patch("ai.indexer.extract_text", return_value="fresh content"),
-        patch("ai.indexer.summarize_text", return_value="Fresh summary"),
-    ):
-        summary = summarize_file(tmp_db, "/src/main.py", model="test-model")
-
-    conn = sqlite3.connect(str(tmp_db))
-    stored = conn.execute(
-        "SELECT summary FROM entities WHERE path = ?",
-        ("/src/main.py",),
-    ).fetchone()[0]
-    conn.close()
-
-    assert summary == "Fresh summary"
-    assert stored == "Fresh summary"
+    indexed_paths = {call.args[0] for call in mock_index.call_args_list}
+    assert indexed_paths == {"/src/main.py", "/src/utils.py"}
+    assert stats["total"] == 2
 
 
 # ── reconcile_lancedb_paths ───────────────────────────────────────────────────
@@ -345,6 +352,26 @@ def test_reconcile_skips_when_no_sqlite_match(tmp_db):
         patch("ai.indexer.update_path_in_store") as mock_update,
     ):
         count = reconcile_lancedb_paths(tmp_db)
+
+    assert count == 0
+    mock_update.assert_not_called()
+
+
+def test_reconcile_scopes_lancedb_entries(tmp_db):
+    conn = sqlite3.connect(str(tmp_db))
+    conn.execute(
+        "INSERT INTO entities VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        ("5", "/other/main_v2.py", "main_v2.py", ".py", 100, 0, 0, 0, "active", "hash_main", None),
+    )
+    conn.commit()
+    conn.close()
+
+    ldb_entries = [{"path": "/old/main.py", "content_hash": "hash_main"}]
+    with (
+        patch("ai.indexer.get_all_entries", return_value=ldb_entries),
+        patch("ai.indexer.update_path_in_store") as mock_update,
+    ):
+        count = reconcile_lancedb_paths(tmp_db, path_prefixes=["/src"])
 
     assert count == 0
     mock_update.assert_not_called()

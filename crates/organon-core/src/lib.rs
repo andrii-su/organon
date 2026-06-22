@@ -6,3 +6,4 @@ pub mod ignore;
 pub mod lifecycle;
 pub mod scanner;
 pub mod watcher;
+pub mod workspace;

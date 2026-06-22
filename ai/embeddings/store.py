@@ -68,12 +68,20 @@ def embed_text(text: str) -> list[float]:
 
 
 def index_file(path: str, text: str, content_hash: str, db_path: str | None = None) -> None:
-    """Embed and store a file. Skips if content_hash already indexed."""
+    """Embed and store a file. Skips only when this path already has this hash."""
     table = _get_table(db_path)
 
-    # Skip if already indexed with same hash
+    # Skip if this exact path is already indexed with the same hash. Identical
+    # content in another workspace still gets its own row so scoped searches work.
     try:
-        existing = table.search().where(f"content_hash = '{content_hash}'").limit(1).to_list()
+        path_escaped = path.replace("'", "''")
+        hash_escaped = content_hash.replace("'", "''")
+        existing = (
+            table.search()
+            .where(f"path = '{path_escaped}' AND content_hash = '{hash_escaped}'")
+            .limit(1)
+            .to_list()
+        )
         if existing:
             logger.debug("index_file: already indexed [%s]: %s", content_hash[:8], path)
             return
@@ -82,7 +90,7 @@ def index_file(path: str, text: str, content_hash: str, db_path: str | None = No
 
     # Remove old entry for this path (hash changed)
     try:
-        table.delete(f"path = '{path}'")
+        table.delete(f"path = '{path_escaped}'")
         logger.debug("index_file: removed stale entry: %s", path)
     except Exception as e:
         logger.debug("index_file: delete failed (ok if new): %s", e)
@@ -209,59 +217,6 @@ def search_by_path(
         }
         for r in results
     ]
-
-
-def find_near_duplicates(
-    threshold: float = 0.95,
-    limit: int = 100,
-    db_path: str | None = None,
-) -> list[dict[str, Any]]:
-    """Find near-duplicate files by comparing vector embeddings.
-
-    For each indexed file, queries its top-5 nearest neighbours.
-    Returns unique pairs with similarity >= threshold, sorted by similarity desc.
-
-    Args:
-        threshold: Minimum cosine similarity (0–1) to be considered a near-duplicate.
-        limit: Maximum pairs to return.
-        db_path: Vector store path.
-    """
-    logger.debug("find_near_duplicates: threshold=%.3f limit=%d", threshold, limit)
-    table = _get_table(db_path)
-
-    try:
-        all_rows = table.search().select(["path", "vector"]).limit(10_000).to_list()
-    except Exception as e:
-        logger.warning("find_near_duplicates: failed to fetch rows: %s", e)
-        return []
-
-    seen: set[tuple[str, str]] = set()
-    results: list[dict[str, Any]] = []
-
-    for row in all_rows:
-        if len(results) >= limit:
-            break
-        try:
-            neighbors = table.search(row["vector"]).limit(6).to_list()
-        except Exception:
-            continue
-        for n in neighbors:
-            if n["path"] == row["path"]:
-                continue
-            sim = float(1 - n.get("_distance", 1))
-            if sim < threshold:
-                continue
-            key = tuple(sorted([row["path"], n["path"]]))
-            if key in seen:
-                continue
-            seen.add(key)
-            results.append({"file1": key[0], "file2": key[1], "similarity": sim})
-            if len(results) >= limit:
-                break
-
-    results.sort(key=lambda x: -x["similarity"])
-    logger.debug("find_near_duplicates: %d pairs found", len(results))
-    return results
 
 
 def update_path_in_store(old_path: str, new_path: str, db_path: str | None = None) -> bool:

@@ -23,14 +23,14 @@ jobs:
         env:
           BRANCH_NAME: ${{ github.head_ref }}
         run: |
-          pattern='^((feat|fix|chore|docs|refactor|test|ci|build|style|perf|revert|release)\/[a-z0-9][a-z0-9._/-]*|(dependabot|renovate)\/.+)$'
+          pattern='^((feat|fix|chore|docs|refactor|test|ci|build|style|perf|revert)\/[a-z0-9][a-z0-9._/-]*|(dependabot|renovate)\/.+)$'
           if [[ "$BRANCH_NAME" =~ $pattern ]]; then
             echo "Branch name OK: $BRANCH_NAME"
             exit 0
           fi
 
           echo "Invalid branch name: $BRANCH_NAME"
-          echo "Expected: <type>/<slug>, for example feat/search-api"
+          echo "Expected: <type>/<slug>, for example feat/context-command"
           exit 1
 
   pr-title:

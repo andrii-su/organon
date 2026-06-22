@@ -77,8 +77,6 @@ pub struct IndexerConfig {
     pub vectors_path: String,
     pub embed_model: String,
     pub max_file_size_mb: u64,
-    /// If true, summarize each file with ollama after embedding
-    pub summarize: bool,
 }
 
 impl Default for IndexerConfig {
@@ -89,21 +87,6 @@ impl Default for IndexerConfig {
             vectors_path: format!("{home}/.organon/vectors"),
             embed_model: "BAAI/bge-small-en-v1.5".to_string(),
             max_file_size_mb: 100,
-            summarize: false,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
-pub struct OllamaConfig {
-    pub model: String,
-}
-
-impl Default for OllamaConfig {
-    fn default() -> Self {
-        Self {
-            model: "llama3.2".to_string(),
         }
     }
 }
@@ -133,7 +116,6 @@ pub struct OrgConfig {
     pub watch: WatchConfig,
     pub search: SearchConfig,
     pub indexer: IndexerConfig,
-    pub ollama: OllamaConfig,
     pub server: ServerConfig,
 }
 
@@ -163,9 +145,6 @@ impl OrgConfig {
         let mut cfg: Self = toml::from_str(&text)?;
         if let Ok(db) = std::env::var("ORGANON_DB") {
             cfg.indexer.db_path = db;
-        }
-        if let Ok(model) = std::env::var("ORGANON_OLLAMA_MODEL") {
-            cfg.ollama.model = model;
         }
         debug!("config loaded from {}", path.display());
         Ok(cfg)

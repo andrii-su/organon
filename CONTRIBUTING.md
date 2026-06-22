@@ -19,14 +19,13 @@ Allowed `type` values:
 - `style`
 - `perf`
 - `revert`
-- `release`
 
 Examples:
 
-- `feat/search-api`
+- `feat/context-command`
 - `fix/indexer-empty-text`
 - `chore/update-deps`
-- `feat(cli): add search command`
+- `refactor/agent-first-slim`
 
 ## Local Checks
 
@@ -34,13 +33,15 @@ Rust:
 
 ```bash
 cargo test --workspace --all-targets
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --all-features -- -D warnings
 ```
 
 Python:
 
 ```bash
 uv sync --group dev
-uv run --group dev ruff check ai
+uv run --group dev ruff check ai tests
 uv run --group dev pytest
 ```
 
@@ -52,11 +53,10 @@ bash -n setup.sh
 
 ## CI
 
-GitHub Actions currently enforce:
+GitHub Actions enforce:
 
-- Rust workspace tests
-- Python tests
-- Python lint for `ai/`
+- Rust build, tests, formatting, and clippy
+- Python tests and linting
 - `setup.sh` shell syntax
 - branch naming
 - commit message semantics
@@ -64,7 +64,5 @@ GitHub Actions currently enforce:
 
 ## Releases
 
-- Merges to `main` trigger `semantic-release`.
-- Release tags use `v<version>`.
-- `CHANGELOG.md` is updated automatically.
-- GitHub Release notes are generated from Conventional Commits.
+Releases are manual for now. Keep version bumps and release notes in the same
+PR when preparing a tagged release.
