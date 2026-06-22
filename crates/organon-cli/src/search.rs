@@ -89,14 +89,6 @@ pub fn python_env(config: &OrgConfig) -> Vec<(String, String)> {
             "ORGANON_EMBED_MODEL".to_string(),
             config.indexer.embed_model.clone(),
         ),
-        (
-            "ORGANON_OLLAMA_MODEL".to_string(),
-            config.ollama.model.clone(),
-        ),
-        (
-            "ORGANON_SUMMARIZE".to_string(),
-            if config.indexer.summarize { "1" } else { "0" }.to_string(),
-        ),
     ]
 }
 

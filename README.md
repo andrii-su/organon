@@ -1,186 +1,202 @@
 # Organon
 
 [![CI](https://github.com/andrii-su/organon/actions/workflows/ci.yml/badge.svg)](https://github.com/andrii-su/organon/actions/workflows/ci.yml)
-[![Docs](https://github.com/andrii-su/organon/actions/workflows/pages.yml/badge.svg)](https://github.com/andrii-su/organon/actions/workflows/pages.yml)
 [![Rust](https://img.shields.io/badge/core-Rust-1a1320?logo=rust&logoColor=white)](./crates/)
 [![Python](https://img.shields.io/badge/ai-Python%203.12%2B-6d28d9?logo=python&logoColor=white)](./ai/)
 [![License: MIT](https://img.shields.io/github/license/andrii-su/organon)](./LICENSE)
 
-![Organon banner](docs/assets/organon-banner.svg)
+**Organon** is a local-first semantic filesystem layer for AI agents. It indexes
+files into a local graph with stable identity, lifecycle state, history,
+relationships, and semantic search, then exposes that graph to agents over MCP.
 
-**Organon** is a local-first semantic layer over your filesystem. Every file becomes a living entity — with identity, context, relationships, and a lifecycle. Built for humans and AI agents alike.
+The goal is simple: give agents the right local context before they change code.
 
-## 🧠 Why Organon
+## Core Capabilities
 
-Files are not static blobs. They're created with intent, evolve over time, relate to other files, and eventually become irrelevant. No existing tool treats them this way.
+- **Entity graph**: stable file identities, lifecycle state, history,
+  relationships, and duplicate detection backed by SQLite.
+- **Semantic retrieval**: local vector search via LanceDB and fastembed, FTS,
+  and hybrid ranking — no external API calls.
+- **Relationship awareness**: import/reference graph, reverse dependencies, and
+  impact analysis.
+- **MCP server**: stdio and HTTP (SSE) modes exposing 10+ tools for agent
+  clients such as Claude Desktop and Cursor.
+- **Local-first storage**: SQLite + LanceDB on disk. No accounts, no telemetry.
 
-- ✅ **Entity graph** — each file gets a stable identity, purpose, tags, and a relationship graph
-- ✅ **Lifecycle engine** — `born → active → dormant → archived → dead`, driven by real events
-- ✅ **Semantic search** — find files by meaning, not just name; vector + FTS + hybrid modes
-- ✅ **MCP server** — Claude, Cursor, and any MCP-compatible agent can query your file graph
-- ✅ **100% local** — SQLite + LanceDB, nothing leaves your machine
+## Installation
 
-## 🌐 Docs
-
-- Live: [andrii-su.github.io/organon](https://andrii-su.github.io/organon/)
-- Source: [`docs/`](docs/)
-
-## 🚀 Quick Start
-
-### 1. Bootstrap
+Requires Rust stable, Python 3.12+, and `uv`.
 
 ```bash
 bash setup.sh
+cargo build --release
 ```
 
-Requires Rust (stable), Python 3.12+, and `uv`.
+## Quick Start
 
-### 2. Watch a directory
+Bootstrap and index a workspace:
 
 ```bash
-organon watch .
+organon watch .        # start watcher + auto-indexer
+organon index          # run Python indexer manually (one-shot)
 ```
 
-### 3. Search semantically
+Inspect context:
 
 ```bash
+organon health
+organon status src/auth.rs
 organon search "authentication logic" --mode hybrid
-organon search "database schema" --state active --ext rs
+organon context "authentication refactor" --scope . --json
+organon plan "change authentication flow" --file src/auth.rs
+organon related-tests src/auth.rs
 ```
 
-### 4. Explore relationships
+Start the MCP server for an agent client:
 
 ```bash
-organon graph src/main.rs --depth 2 --format mermaid
+organon mcp            # stdio (default, for Claude Desktop / Cursor)
+organon mcp --sse      # HTTP SSE server
 ```
 
-### 5. Run the desktop UI
+MCP sessions are scoped to the current directory by default. Pass a workspace
+path or `--scope <dir>` to choose an explicit scope.
+
+## MCP Integration
+
+Add to `~/.claude/claude_desktop_config.json` (Claude Desktop):
+
+```json
+{
+  "mcpServers": {
+    "organon": {
+      "command": "organon",
+      "args": ["mcp"],
+      "env": {}
+    }
+  }
+}
+```
+
+For Cursor or any MCP-compatible client, point it at `organon mcp` (stdio) or
+`organon mcp --sse` (HTTP).
+
+### Available MCP Tools
+
+| Tool | Description |
+| ---- | ----------- |
+| `search_files` | Semantic, FTS, or hybrid search |
+| `get_entity` | Entity metadata and lifecycle state |
+| `get_graph` | Dependency graph around a file |
+| `get_file_content` | File content with optional line range |
+| `build_context` | Compact agent context pack for a task |
+| `find_duplicates` | Identify duplicate or near-duplicate files |
+| `get_history` | Change history for a file |
+| `get_impact` | Files impacted by changing a target file |
+| `list_saved_queries` | List saved search queries |
+| `run_saved_query` | Execute a saved query |
+| `list_by_lifecycle` | Files filtered by lifecycle state |
+| `stats` | Workspace statistics |
+
+## CLI Reference
 
 ```bash
-cd apps/desktop
-npm install
-npm run tauri dev
-```
-
-The Tauri shell talks to the existing local REST API and auto-starts the same
-server in-process when no API is already running.
-
-## 🔄 Lifecycle
-
-Every entity moves through a deterministic state machine:
-
-```text
-born → active → dormant → archived → dead
-```
-
-Transitions are driven by filesystem events, git activity, access patterns, and explicit commands. Organon surfaces what matters now and archives what doesn't.
-
-## 🖥️ CLI Reference
-
-```bash
-# Watch roots for filesystem changes
+# Watcher and indexer
 organon watch .
+organon watch /path/to/workspace --daemon
+organon daemon list
+organon daemon logs <id>
+organon daemon stop <id>
+organon index
+organon index /path/to/workspace
 
-# Metadata filters
-organon find --state active --ext rs
+# Entity inspection
+organon status <file>
+organon find --state dormant --ext rs
 organon find --modified-after 2026-01-01 --larger-than-mb 10
 
-# Search: vector · FTS · hybrid
-organon search "watcher" --state active --mode hybrid
-organon search "sqlite graph" --modified-after 2026-01-01
+# Search
+organon search "query"
+organon search "watcher" --state active --mode hybrid --explain
+organon search --like src/auth.rs --limit 5
 
-# Graph output — text, DOT, Mermaid
-organon graph path/to/file.rs --depth 2 --format text
-organon graph path/to/file.rs --format dot
-organon graph path/to/file.rs --format mermaid
+# Agent context
+organon context "task description" --scope /path/to/workspace --budget 12000 --json
+organon context --path src/auth.rs --budget 8000
+organon plan "change lifecycle rules" --file crates/organon-core/src/lifecycle.rs
 
-# Diff filesystem vs DB, export, summarize
-organon diff .
-organon export --format json
-organon export --format csv --output entities.csv
-organon summarize path/to/file.rs --model llama3.2
+# Graph and impact
+organon graph src/main.rs --depth 2 --format text
+organon impact src/auth.rs --depth 3
+organon history src/auth.rs --limit 20
+organon related-tests src/auth.rs
+
+# Maintenance
+organon health
+organon doctor
+organon duplicates
+organon clean --dry-run
+organon cleanup --dry-run
 ```
 
-Global flags: `--quiet` · `-v` (info) · `-vv` (debug)
+Global flags: `--quiet`, `-v` (info), `-vv` (debug).
 
-## 🏗️ Architecture
+## Architecture
 
-```text
+```
 crates/
-  organon-core/   Rust: filesystem watcher, entity graph (SQLite), lifecycle engine
-  organon-mcp/    Rust: MCP server exposing the graph to AI agents
-  organon-cli/    Rust: CLI for querying and managing entities
-apps/
-  desktop/        Tauri + React shell over the existing REST API
+  organon-core/   Rust library: entity graph, lifecycle engine, SQLite, watcher, scanner
+  organon-cli/    Rust binary (organon): 20+ subcommands, Python bridge
+  organon-mcp/    Rust: MCP server (stdio + HTTP/SSE)
 ai/
-  extractor/      Python: content extraction (text, PDF, code, images)
-  embeddings/     Python: local semantic vectors via fastembed + lancedb
-  mcp_server/     Python: MCP tools (search, query, relate)
+  indexer.py      Entry point: orchestrates extraction, embedding, relation indexing
+  embeddings/     Local semantic vectors via fastembed + LanceDB
+  extractor/      Content extraction (text, PDF, code)
+  relations/      Import/reference graph extraction
 ```
 
-## 📦 Stack
+## Stack
 
 | Layer | Technology |
 | ----- | ---------- |
-| Core daemon | Rust — `notify` · `tokio` · `rusqlite` · `tantivy` |
-| Semantic vectors | Python — `fastembed` · `lancedb` |
-| Content extraction | Python — text · PDF · code · images |
-| Local LLM | `ollama` — summaries via any local model |
-| Agent protocol | MCP (Model Context Protocol) |
-| Storage | SQLite + LanceDB — 100% on-disk |
-| Desktop UI | Tauri + React — practical shell over the existing API |
+| Core | Rust: `notify`, `tokio`, `rusqlite` |
+| Semantic vectors | Python: `fastembed`, `lancedb` |
+| Content extraction | Python: text, PDF, code |
+| Agent protocol | MCP (stdio + HTTP/SSE) |
+| Storage | SQLite + LanceDB |
 
-## 🧪 Development
+## Development
 
 ```bash
-# Rust tests
+# Rust build and tests
+cargo build --release
 cargo test --workspace --all-targets
 
-# Python linting
-uv run --group dev ruff check ai
+# Rust formatting and linting
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --all-features -- -D warnings
 
-# Python tests
+# Python linting and tests
+uv run --group dev ruff check ai tests
 uv run --group dev pytest
+
+# Python indexer health check
+uv run python -m ai.indexer --health
 ```
 
-### Desktop UI
+The Rust CLI invokes Python via `uv run --project <organon-root> python -m ai.indexer`.
+If the repository root cannot be resolved from the installed binary or current
+directory, set `ORGANON_PYTHON_PROJECT=/path/to/organon`. For non-standard uv
+installations, set `ORGANON_UV=/path/to/uv`.
 
-```bash
-cd apps/desktop
+## Principles
 
-# install frontend + tauri dependencies
-npm install
-
-# dev mode
-npm run tauri dev
-
-# frontend tests
-npm test
-
-# production app build
-npm run tauri build
-```
-
-The desktop app currently ships `Search`, `Graph`, `History`, `Impact`, and
-`Duplicates` screens plus a shared entity detail panel.
-
-## 🛣️ Roadmap
-
-- [ ] `organon-core`: filesystem watcher + SQLite entity graph
-- [ ] `organon-core`: lifecycle state machine
-- [ ] `ai/extractor`: content extraction (text, PDF, code)
-- [ ] `ai/embeddings`: local semantic vectors with fastembed
-- [ ] `organon-mcp`: MCP server (search, query, relate)
-- [ ] `organon-cli`: CLI for power users
-- [ ] Dogfood: integrate with OpenClaw/Nova
-- [ ] macOS menu bar app (Tauri)
-
-## 🔒 Principles
-
-- **Local-first.** Nothing leaves your machine without explicit permission.
-- **Open.** MIT license. No telemetry. No accounts.
-- **Agent-native.** MCP server from day one.
-- **Lifecycle-aware.** Files are organisms, not static objects.
+- **Local-first**: nothing leaves your machine unless you configure another tool
+  to send it.
+- **Agent-native**: MCP and task context are first-class product surfaces.
+- **Small surface area**: fewer workflows, stronger core.
+- **Lifecycle-aware**: stale, dormant, archived, and dead files remain visible
+  to agents rather than being treated as anonymous blobs.
 
 ## License
 

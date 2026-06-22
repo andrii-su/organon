@@ -433,15 +433,6 @@ impl Graph {
         Ok(())
     }
 
-    /// Store an LLM-generated summary for a file.
-    pub fn update_summary(&self, path: &str, summary: &str) -> Result<()> {
-        self.conn.execute(
-            "UPDATE entities SET summary = ?2 WHERE path = ?1",
-            params![path, summary],
-        )?;
-        Ok(())
-    }
-
     /// Return all entities whose `content_hash` matches. Used for rename detection.
     pub fn get_by_hash(&self, content_hash: &str) -> Result<Vec<Entity>> {
         let mut stmt = self.conn.prepare(

@@ -49,14 +49,6 @@ else
     ok "uv $(uv --version)"
 fi
 
-# ollama (optional — for NL query feature)
-if check_cmd ollama; then
-    ok "ollama found — NL query feature available"
-else
-    warn "ollama not found — NL query will use fallback mode"
-    warn "Install from https://ollama.com then: ollama pull llama3.2"
-fi
-
 # ── 2. Python dependencies ────────────────────────────────────────────────────
 step "Installing Python dependencies"
 cd "$ORGANON_ROOT"
@@ -138,19 +130,19 @@ else
     exit 1
 fi
 
-# Verify Python layer works
-if uv run python -c "from ai.embeddings.store import embed_text; embed_text('test')" &>/dev/null; then
-    ok "Python AI layer (embeddings) OK"
+# Verify Python bridge works through the same entrypoint the CLI uses
+if uv run --project "$ORGANON_ROOT" python -m ai.indexer --health &>/dev/null; then
+    ok "Python indexer bridge OK"
 else
-    warn "Python AI layer check failed — run 'organon index' to diagnose"
+    warn "Python indexer bridge check failed — run 'organon doctor' to diagnose"
 fi
 
 # Verify installed command still finds Python package outside repo root
 TMP_SMOKE_DIR="$(mktemp -d)"
-if (cd "$TMP_SMOKE_DIR" && organon doctor | grep -q '\[OK\]    lancedb'); then
+if (cd "$TMP_SMOKE_DIR" && organon doctor | grep -q '\[OK\]    python'); then
     ok "Installed CLI resolves Python env outside repo"
 else
-    warn "Installed CLI cannot resolve Python env outside repo — rerun setup.sh"
+    warn "Installed CLI cannot resolve Python bridge outside repo — set ORGANON_PYTHON_PROJECT=$ORGANON_ROOT"
 fi
 rm -rf "$TMP_SMOKE_DIR"
 
@@ -172,11 +164,6 @@ echo "    organon search \"your query\" # semantic search"
 echo "    organon stats                 # show graph stats"
 echo "    organon mcp                   # start MCP server for Claude"
 echo ""
-if ! command -v ollama &>/dev/null; then
-    echo -e "  ${YELLOW}Optional:${RESET} install ollama for NL queries"
-    echo "    https://ollama.com → ollama pull llama3.2"
-    echo ""
-fi
 echo -e "  ${YELLOW}Note:${RESET} reload your shell or run:"
 echo "    export PATH=\"\$HOME/.local/bin:\$PATH\""
 echo ""
