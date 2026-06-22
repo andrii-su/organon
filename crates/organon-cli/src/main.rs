@@ -305,14 +305,16 @@ fn workspace_path_hint(command: &Cmd) -> Option<PathBuf> {
     }
 }
 
-/// Resolve config file path, honouring `ORGANON_CONFIG` env override.
+/// Resolve config file path.
+///
+/// Precedence: explicit `ORGANON_CONFIG` override → `ORGANON_HOME`/config.toml →
+/// `~/.organon/config.toml`. Routing through [`organon_home`] keeps `ORGANON_HOME`
+/// a complete isolation switch for sandboxed runs.
 pub(crate) fn config_path() -> PathBuf {
-    std::env::var("ORGANON_CONFIG")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| {
-            let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-            PathBuf::from(format!("{home}/.organon/config.toml"))
-        })
+    if let Ok(path) = std::env::var("ORGANON_CONFIG") {
+        return PathBuf::from(path);
+    }
+    organon_home().join("config.toml")
 }
 
 /// Open an existing graph DB; bail with a helpful message if it doesn't exist.

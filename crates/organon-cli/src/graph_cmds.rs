@@ -12,6 +12,18 @@ use crate::graph_view::{
 };
 use crate::{open_graph, GraphFormat};
 
+/// Warn (to stderr) when the relationship table is empty so users don't mistake an
+/// un-indexed DB for "no dependencies". Relations are populated by the Python indexer
+/// (`organon index`), not by `organon watch` alone. Printed to stderr to keep stdout
+/// (text/DOT/Mermaid/JSON) clean for piping.
+fn warn_if_no_relations(graph: &organon_core::graph::Graph) {
+    if graph.relation_count().unwrap_or(0) == 0 {
+        eprintln!(
+            "note: graph DB has 0 relations — run `organon index` to extract imports/references"
+        );
+    }
+}
+
 /// Show the import/reference graph for a file.
 pub(crate) fn cmd_graph(
     path: &PathBuf,
@@ -20,6 +32,7 @@ pub(crate) fn cmd_graph(
     db_path: &Path,
 ) -> Result<()> {
     let graph = open_graph(db_path)?;
+    warn_if_no_relations(&graph);
     let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.clone());
     let path_str = canonical.to_string_lossy();
     let depth_clamped = depth.min(3);
@@ -91,6 +104,7 @@ pub(crate) fn cmd_history(path: &PathBuf, limit: usize, json: bool, db_path: &Pa
 /// Show reverse dependencies — files that import/reference this file.
 pub(crate) fn cmd_impact(path: &PathBuf, depth: u8, json: bool, db_path: &Path) -> Result<()> {
     let graph = open_graph(db_path)?;
+    warn_if_no_relations(&graph);
     let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.clone());
     let path_str = canonical.to_string_lossy();
 

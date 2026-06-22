@@ -1006,13 +1006,20 @@ impl McpService {
         }
     }
 
+    /// Resolve the saved-queries file path.
+    ///
+    /// Precedence: explicit `ORGANON_QUERIES` override → `ORGANON_HOME`/saved_queries.json
+    /// → `~/.organon/saved_queries.json`. Must match the CLI's `queries::queries_path`
+    /// so both read the same store.
     fn saved_queries_path(&self) -> PathBuf {
-        std::env::var("ORGANON_QUERIES")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| {
-                let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-                PathBuf::from(format!("{home}/.organon/saved_queries.json"))
-            })
+        if let Ok(path) = std::env::var("ORGANON_QUERIES") {
+            return PathBuf::from(path);
+        }
+        let home = std::env::var("ORGANON_HOME").unwrap_or_else(|_| {
+            let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+            format!("{home}/.organon")
+        });
+        PathBuf::from(home).join("saved_queries.json")
     }
 
     fn python_run(&self, args: &[&str]) -> Result<String> {

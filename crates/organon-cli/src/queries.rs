@@ -13,13 +13,16 @@ use serde::{Deserialize, Serialize};
 
 // ── storage ───────────────────────────────────────────────────────────────────
 
+/// Resolve the saved-queries file path.
+///
+/// Precedence: explicit `ORGANON_QUERIES` override → `ORGANON_HOME`/saved_queries.json
+/// → `~/.organon/saved_queries.json`. Sharing [`crate::organon_home`] keeps
+/// `ORGANON_HOME` a complete isolation switch.
 pub fn queries_path() -> PathBuf {
-    std::env::var("ORGANON_QUERIES")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| {
-            let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-            PathBuf::from(format!("{home}/.organon/saved_queries.json"))
-        })
+    if let Ok(path) = std::env::var("ORGANON_QUERIES") {
+        return PathBuf::from(path);
+    }
+    crate::organon_home().join("saved_queries.json")
 }
 
 // ── data model ────────────────────────────────────────────────────────────────
