@@ -12,3 +12,4 @@ logs/
 .vscode/
 .idea/
 *.log
+.claude/
