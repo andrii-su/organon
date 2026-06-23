@@ -1,0 +1,17 @@
+{
+  "name": "organon",
+  "owner": {
+    "name": "Andrii Suruhov",
+    "email": "andrii.suruhov@gmail.com"
+  },
+  "description": "Organon — local-first semantic filesystem layer for AI agents, exposed over MCP.",
+  "plugins": [
+    {
+      "name": "organon",
+      "source": "./plugins/organon",
+      "description": "Registers the Organon MCP server (stdio): semantic search, entity graph, lifecycle, impact, and context tools.",
+      "category": "developer-tools",
+      "tags": ["mcp", "filesystem", "semantic-search", "code-graph", "local-first"]
+    }
+  ]
+}

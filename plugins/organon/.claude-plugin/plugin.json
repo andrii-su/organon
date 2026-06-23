@@ -1,0 +1,14 @@
+{
+  "name": "organon",
+  "displayName": "Organon",
+  "version": "0.1.0",
+  "description": "Local-first semantic filesystem layer for AI agents. Registers the Organon MCP server (stdio) for semantic search, entity graph, lifecycle, impact analysis, and task context packs.",
+  "author": {
+    "name": "Andrii Suruhov",
+    "email": "andrii.suruhov@gmail.com"
+  },
+  "homepage": "https://github.com/andrii-su/organon",
+  "repository": "https://github.com/andrii-su/organon",
+  "license": "MIT",
+  "keywords": ["mcp", "filesystem", "semantic-search", "code-graph", "lifecycle", "local-first"]
+}

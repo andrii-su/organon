@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "organon": {
+      "command": "organon",
+      "args": ["mcp", "--scope", "."]
+    }
+  }
+}

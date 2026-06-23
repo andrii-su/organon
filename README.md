@@ -108,6 +108,11 @@ cargo build --release   # target/release/organon
 uv sync                 # Python AI layer (fastembed, lancedb, ...)
 ```
 
+Prebuilt binaries for macOS and Linux are attached to each
+[GitHub Release](https://github.com/andrii-su/organon/releases) (the graph,
+lifecycle, history, and impact tools run from the binary alone; semantic vector
+search needs the Python layer).
+
 The first semantic index downloads the embedding model (`BAAI/bge-small-en-v1.5`, ~130 MB) once, then runs fully offline.
 
 ## Quick Start
@@ -208,13 +213,23 @@ A session is scoped to the current directory by default; pass a path, `--scope <
 
 ## Claude Code
 
-Point Claude Code at the same MCP server:
+Install the plugin from the marketplace:
+
+```bash
+claude plugin marketplace add andrii-su/organon
+claude plugin install organon@organon
+```
+
+Or point Claude Code at the MCP server directly:
 
 ```bash
 claude mcp add organon -- organon mcp --scope .
 ```
 
 Then in-session: *"use organon to find what depends on src/auth.rs before we change it"*.
+
+The `organon` binary must be on `PATH`. Other channels and their status are
+tracked in [docs/marketplaces.md](./docs/marketplaces.md).
 
 ## CLI Reference
 
@@ -327,6 +342,7 @@ The Rust CLI invokes Python via `uv run --project <organon-root> python -m ai.in
 - [docs/agent-usage.md](./docs/agent-usage.md) — how agents use Organon
 - [docs/claude-desktop.md](./docs/claude-desktop.md) — Claude Desktop setup
 - [docs/cursor.md](./docs/cursor.md) — Cursor setup
+- [docs/marketplaces.md](./docs/marketplaces.md) — distribution & marketplace status
 - [CONTRIBUTING.md](./CONTRIBUTING.md) — contributor workflow
 - [Issues](https://github.com/andrii-su/organon/issues) — bugs, features, questions
 

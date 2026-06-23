@@ -1,0 +1,97 @@
+name: Release
+
+# Build prebuilt `organon` binaries for each tagged release and attach them to a
+# GitHub Release. Tag with `vX.Y.Z` (e.g. `git tag v1.3.0 && git push --tags`).
+#
+# The binaries cover the Rust core + CLI + MCP server. The Python AI layer
+# (semantic vectors) is installed separately via `uv sync`; the MCP graph,
+# lifecycle, history, and impact tools work from the binary alone.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            target: aarch64-apple-darwin
+          - os: macos-latest
+            target: x86_64-apple-darwin
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cross-linker (aarch64 linux)
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+          mkdir -p .cargo
+          {
+            echo '[target.aarch64-unknown-linux-gnu]'
+            echo 'linker = "aarch64-linux-gnu-gcc"'
+          } >> .cargo/config.toml
+
+      - name: Build
+        run: cargo build --release --locked --target ${{ matrix.target }} --bin organon
+
+      - name: Package
+        shell: bash
+        run: |
+          bin="target/${{ matrix.target }}/release/organon"
+          dist="organon-${{ matrix.target }}"
+          mkdir -p "$dist"
+          cp "$bin" "$dist/"
+          cp README.md LICENSE "$dist/"
+          tar -czf "$dist.tar.gz" "$dist"
+          shasum -a 256 "$dist.tar.gz" > "$dist.tar.gz.sha256"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: organon-${{ matrix.target }}
+          path: |
+            organon-${{ matrix.target }}.tar.gz
+            organon-${{ matrix.target }}.tar.gz.sha256
+
+  release:
+    name: publish release
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.tar.gz
+            dist/*.tar.gz.sha256
+          generate_release_notes: true
