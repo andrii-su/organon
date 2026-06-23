@@ -1,0 +1,21 @@
+# Keep the build context small — copy only what the image needs.
+target/
+.git/
+.github/
+.claude/
+.claude-plugin/
+plugins/
+docs/
+apps/
+tests/
+ai/tests/
+**/__pycache__/
+*.pyc
+.venv/
+.env
+*.db
+*.log
+README.md
+CONTRIBUTING.md
+LICENSE
+CHANGELOG.md

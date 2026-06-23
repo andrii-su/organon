@@ -115,6 +115,24 @@ search needs the Python layer).
 
 The first semantic index downloads the embedding model (`BAAI/bge-small-en-v1.5`, ~130 MB) once, then runs fully offline.
 
+### Docker
+
+A self-contained image (Rust binary + Python layer) is published to
+`ghcr.io/andrii-su/organon`:
+
+```bash
+# Index a project (state persists in a named volume)
+docker run --rm -v "$PWD:/workspace" -v organon-data:/data \
+  ghcr.io/andrii-su/organon index /workspace
+
+# Serve the MCP server over stdio
+docker run -i --rm -v "$PWD:/workspace" -v organon-data:/data \
+  ghcr.io/andrii-su/organon mcp --scope /workspace
+```
+
+Mount your project at `/workspace` and a named volume at `/data` (graph DB,
+vectors, model cache).
+
 ## Quick Start
 
 ```bash

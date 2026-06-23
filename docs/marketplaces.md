@@ -7,11 +7,13 @@ Where Organon's MCP server can be listed, and what each channel needs.
 | Claude Code plugin | ✅ live | `.claude-plugin/` manifest in this repo (done) |
 | Glama | ✅ live | `glama.json` in this repo (done) |
 | GitHub Releases (prebuilt binaries) | ✅ live | `.github/workflows/release.yml`, push a `vX.Y.Z` tag |
-| MCP Registry (official) | ⏳ gated | a published package — `cargo publish` or an OCI image |
-| Smithery | ⏳ gated | an npm wrapper or a Docker image |
+| Docker image (GHCR) | ✅ live | `Dockerfile` + `.github/workflows/docker.yml`, push a `vX.Y.Z` tag |
+| MCP Registry (official) | ⏳ ready | submit `server.json` (OCI variant — the GHCR image satisfies it) |
+| Smithery | ⏳ ready | submit `smithery.yaml` (container deploy via the GHCR image) |
 
-The gated channels need a published, runnable artifact — prebuilt GitHub-release
-binaries alone do not satisfy them (there is no "github-release" package type).
+The Docker image unblocks the last two channels: it's a published, runnable OCI
+artifact, which is exactly what the MCP Registry (`oci` package) and Smithery
+(container deploy) need.
 
 ______________________________________________________________________
 
@@ -39,35 +41,52 @@ Tag a release to build and attach binaries for macOS (arm64/x64) and Linux
 (x64/arm64):
 
 ```bash
-git tag v0.1.0
-git push origin v0.1.0
+git tag v1.3.0
+git push origin v1.3.0
 ```
+
+### Docker image (GHCR)
+
+The same tag also builds and pushes `ghcr.io/andrii-su/organon` (see
+[`Dockerfile`](../Dockerfile) and `.github/workflows/docker.yml`). It bundles the
+Rust binary + Python layer, so all MCP tools work from one image.
+
+```bash
+# Index a project (persist state in a named volume)
+docker run --rm -v "$PWD:/workspace" -v organon-data:/data \
+  ghcr.io/andrii-su/organon index /workspace
+
+# Serve the MCP server over stdio
+docker run -i --rm -v "$PWD:/workspace" -v organon-data:/data \
+  ghcr.io/andrii-su/organon mcp --scope /workspace
+```
+
+State (graph DB, vectors, model cache) lives under `ORGANON_HOME=/data`; mount a
+named volume to persist it. Mount your project at `/workspace`.
 
 ______________________________________________________________________
 
-## Gated on publishing
+## Ready to submit (once the image is published)
 
-These are ready to submit **once `organon-cli` is published to crates.io** (or an
-OCI image is built). Publishing to crates.io is a deliberate, hard-to-reverse step
-on the project's namespace — do it intentionally.
+The MCP Registry and Smithery need a published runnable artifact — the GHCR image
+above satisfies both. Submit after the first `vX.Y.Z` tag has pushed the image.
 
 ### MCP Registry — `server.json`
 
-Name: `io.github.andrii-su/organon`. Valid once the `cargo` package exists:
+Name: `io.github.andrii-su/organon`. OCI variant (uses the published image):
 
 ```json
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.andrii-su/organon",
   "description": "Local-first semantic filesystem layer for AI agents — entity graph, lifecycle, semantic search over MCP.",
-  "version": "0.1.0",
+  "version": "1.3.0",
   "repository": { "url": "https://github.com/andrii-su/organon", "source": "github" },
   "websiteUrl": "https://github.com/andrii-su/organon",
   "packages": [
     {
-      "registryType": "cargo",
-      "identifier": "organon-cli",
-      "version": "0.1.0",
+      "registryType": "oci",
+      "identifier": "ghcr.io/andrii-su/organon:1.3.0",
       "transport": { "type": "stdio" }
     }
   ]
@@ -84,12 +103,10 @@ mcp-publisher publish
 
 Or automate from CI with GitHub OIDC (`id-token: write`, no stored secrets).
 
-> Note: the installed binary is `organon`, but the cargo `identifier` must be the
-> published crate name `organon-cli`. Publishing the CLI to crates.io also requires
-> publishing `organon-core` and `organon-mcp` first (path deps need real versions),
-> and the binary still needs the Python layer for vector search — graph, lifecycle,
-> history, and impact tools work standalone. An OCI image is the alternative that
-> bundles everything.
+> The `oci` package bundles the Rust binary + Python layer, so all 13 tools work.
+> A `cargo` package (after `cargo publish` of `organon-core` → `organon-mcp` →
+> `organon-cli`) is an alternative, but the cargo install would still need the
+> Python layer separately for vector search.
 
 ### Smithery — `smithery.yaml`
 
@@ -107,15 +124,16 @@ startCommand:
     (config) => ({ command: "organon", args: ["mcp", "--scope", config.scope || "."] })
 ```
 
-Smithery's local target is Node/`package.json`-oriented and hosted deploy expects a
-container, so this needs an npm wrapper or Docker image before submission. Lowest
-priority of the gated channels.
+Smithery's hosted deploy expects a container — the GHCR image covers that. Point a
+Smithery container deployment at `ghcr.io/andrii-su/organon` (entrypoint already
+runs `organon mcp`). Lowest priority of the channels, but no longer blocked.
 
 ______________________________________________________________________
 
 ## Recommended order
 
-1. ✅ Claude Code plugin + Glama + release workflow (done)
-2. Decide on distribution: `cargo publish` (crates.io) or an OCI image
-3. After publishing → submit `server.json` to the MCP Registry
-4. After an npm wrapper / Docker image → submit `smithery.yaml` to Smithery
+1. ✅ Claude Code plugin + Glama + release + Docker workflows (done)
+2. Push a `vX.Y.Z` tag → publishes binaries **and** the GHCR image
+3. Claim the Glama listing on glama.ai (GitHub auth)
+4. Submit `server.json` (OCI variant) to the MCP Registry via `mcp-publisher`
+5. Optionally add a Smithery container deployment pointing at the GHCR image
