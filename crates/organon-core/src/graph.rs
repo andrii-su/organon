@@ -81,6 +81,14 @@ impl Graph {
     pub fn open(db_path: &str) -> Result<Self> {
         debug!("opening graph db: {db_path}");
         let conn = Connection::open(db_path)?;
+        // The watch daemon writes continuously while the MCP server and CLI open
+        // their own connections to the same file. Without WAL + a busy timeout,
+        // concurrent access fails immediately with SQLITE_BUSY ("database is
+        // locked"). WAL lets readers and a writer coexist; the busy timeout makes
+        // contending writers block-and-retry instead of erroring out.
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
+        conn.pragma_update(None, "journal_mode", "WAL")?;
+        conn.pragma_update(None, "synchronous", "NORMAL")?;
         let graph = Self { conn };
         graph.migrate()?;
         Ok(graph)
@@ -943,6 +951,32 @@ mod tests {
             summary: None,
             git_author: None,
         }
+    }
+
+    // ── concurrency ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn wal_mode_is_enabled() {
+        let (g, _f) = tmp_graph();
+        let mode: String = g
+            .conn
+            .query_row("PRAGMA journal_mode", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(mode.to_lowercase(), "wal");
+    }
+
+    #[test]
+    fn two_connections_can_write_and_read_concurrently() {
+        // Open a second Graph on the same file; a write on one must be visible
+        // to the other without a SQLITE_BUSY "database is locked" error.
+        let f = NamedTempFile::new().unwrap();
+        let path = f.path().to_str().unwrap();
+        let writer = Graph::open(path).unwrap();
+        let reader = Graph::open(path).unwrap();
+
+        writer.upsert(&mk_entity("/concurrent.rs")).unwrap();
+        let got = reader.get_by_path("/concurrent.rs").unwrap();
+        assert!(got.is_some(), "second connection must see the committed write");
     }
 
     // ── truncate_on_char_boundary / update_fts ──────────────────────────────
