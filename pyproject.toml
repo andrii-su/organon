@@ -5,7 +5,7 @@ description = "Organon AI layer — extraction, embeddings, relations, and index
 requires-python = ">=3.11"
 dependencies = [
     "fastembed>=0.3",
-    "lancedb>=0.6",
+    "lancedb>=0.34.0",
     "pyarrow>=24.0.0",
     "pypdf>=6.14.0",
     "ruff>=0.15.20",
