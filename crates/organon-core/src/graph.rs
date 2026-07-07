@@ -652,7 +652,7 @@ impl Graph {
             .execute("DELETE FROM entities_fts WHERE path = ?1", params![path])?;
         self.conn.execute(
             "INSERT INTO entities_fts(path, name, content) VALUES (?1, ?2, ?3)",
-            params![path, name, &content[..content.len().min(4000)]],
+            params![path, name, truncate_on_char_boundary(content, 4000)],
         )?;
         Ok(())
     }
@@ -791,6 +791,20 @@ impl Graph {
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
+/// Truncate `s` to at most `max_bytes` bytes without splitting a UTF-8
+/// character. Returns the largest prefix whose byte length is `<= max_bytes`.
+fn truncate_on_char_boundary(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes {
+        return s;
+    }
+    // Walk back from max_bytes until we land on a char boundary.
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
 fn row_to_entity(row: &rusqlite::Row<'_>) -> rusqlite::Result<Entity> {
     Ok(Entity {
         id: row.get(0)?,
@@ -927,6 +941,32 @@ mod tests {
             summary: None,
             git_author: None,
         }
+    }
+
+    // ── truncate_on_char_boundary / update_fts ──────────────────────────────
+
+    #[test]
+    fn truncate_never_splits_multibyte_char() {
+        // "é" is 2 bytes (U+00E9). A 4001-char string of "é" is 8002 bytes;
+        // cutting at 4000 bytes lands mid-char with a naive byte slice.
+        let s = "é".repeat(4001);
+        let out = truncate_on_char_boundary(&s, 4000);
+        assert!(out.len() <= 4000);
+        assert!(s.is_char_boundary(out.len()));
+        // Result is valid UTF-8 by construction (it's a &str), so just re-derive.
+        assert_eq!(out.len() % 2, 0); // whole "é" chars only
+    }
+
+    #[test]
+    fn truncate_shorter_than_limit_is_identity() {
+        assert_eq!(truncate_on_char_boundary("hello", 4000), "hello");
+    }
+
+    #[test]
+    fn update_fts_with_multibyte_content_does_not_panic() {
+        let (g, _f) = tmp_graph();
+        let content = "日本語テスト".repeat(1000); // multi-byte, > 4000 bytes
+        g.update_fts("a/b.rs", "b.rs", &content).unwrap();
     }
 
     // ── reverse_deps ─────────────────────────────────────────────────────────
