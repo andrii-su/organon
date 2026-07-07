@@ -23,7 +23,6 @@ from ai.common.ignore import is_ignored
 from ai.common.sensitive import is_sensitive, sensitive_reason
 from ai.embeddings.store import (
     get_all_entries,
-    get_indexed_hashes,
     index_file,
     update_path_in_store,
 )
@@ -193,7 +192,12 @@ def run_once(
         return {"total": 0, "indexed": 0, "skipped": 0, "errors": 0, "sensitive_skipped": 0}
 
     logger.info("indexing %d entities from graph", len(entities))
-    indexed_hashes = get_indexed_hashes(db_path=vectors_db_path)
+    # Track (path, content_hash) pairs, not bare hashes: index_file stores one
+    # row per path, so identical content at two paths must each be embedded.
+    # Keying on hash alone would skip the second path and break scoped search.
+    indexed_pairs = {
+        (e["path"], e["content_hash"]) for e in get_all_entries(db_path=vectors_db_path)
+    }
     fts_paths = get_fts_paths(db_path, prefixes)
     stats = {
         "total": len(entities),
@@ -207,7 +211,7 @@ def run_once(
         path = entity["path"]
         name = entity["name"]
         content_hash = entity["content_hash"]
-        needs_vector = content_hash not in indexed_hashes
+        needs_vector = (path, content_hash) not in indexed_pairs
         needs_fts = path not in fts_paths
 
         if is_ignored(path):
@@ -243,7 +247,7 @@ def run_once(
         try:
             if needs_vector:
                 index_file(path, text, content_hash, db_path=vectors_db_path)
-                indexed_hashes.add(content_hash)
+                indexed_pairs.add((path, content_hash))
                 stats["indexed"] += 1
                 logger.info("indexed: %s", path)
             else:
