@@ -1292,7 +1292,7 @@ impl ServerHandler for OrganonMcpServer {
         _context: RequestContext<RoleServer>,
     ) -> std::result::Result<ListResourcesResult, McpError> {
         Ok(ListResourcesResult {
-            resources: vec![RawResource::new("organon://entities", "entities").no_annotation()],
+            resources: vec![Resource::new("organon://entities", "entities")],
             next_cursor: None,
             meta: None,
         })
