@@ -7,6 +7,7 @@ import logging
 import sqlite3
 import time
 from collections import deque
+from contextlib import contextmanager
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -15,10 +16,21 @@ DB_PATH = Path("~/.organon/entities.db").expanduser()
 _MAX_GRAPH_NODES = 50
 
 
+@contextmanager
 def _db(db_path=DB_PATH):
+    """Open a connection, commit on clean exit, and always close it.
+
+    sqlite3.Connection's own context manager commits/rolls back but never
+    closes, leaking the connection (and its fd). This wrapper guarantees the
+    connection is closed even on error.
+    """
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
-    return conn
+    try:
+        yield conn
+        conn.commit()
+    finally:
+        conn.close()
 
 
 # ── write ─────────────────────────────────────────────────────────────────────

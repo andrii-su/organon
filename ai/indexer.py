@@ -16,6 +16,7 @@ import logging
 import sqlite3
 import sys
 import time
+from contextlib import closing
 from pathlib import Path
 
 from ai.common.ignore import is_ignored
@@ -89,7 +90,9 @@ def get_entities(db_path: Path, path_prefixes: list[str] | None = None) -> list[
 def get_fts_paths(db_path: Path, path_prefixes: list[str] | None = None) -> set[str]:
     prefixes = _normalize_prefixes(path_prefixes)
     scoped_where, scoped_params = _scoped_where(prefixes)
-    with sqlite3.connect(str(db_path)) as conn:
+    # `closing` guarantees the connection is closed; the inner `conn` context
+    # manager handles commit/rollback. sqlite3's own CM never closes.
+    with closing(sqlite3.connect(str(db_path))) as conn, conn:
         conn.row_factory = sqlite3.Row
         conn.execute(
             "CREATE VIRTUAL TABLE IF NOT EXISTS entities_fts USING fts5("
@@ -103,7 +106,7 @@ def get_fts_paths(db_path: Path, path_prefixes: list[str] | None = None) -> set[
 
 
 def update_fts(db_path: Path, path: str, name: str, text: str) -> None:
-    with sqlite3.connect(str(db_path)) as conn:
+    with closing(sqlite3.connect(str(db_path))) as conn, conn:
         conn.execute(
             "CREATE VIRTUAL TABLE IF NOT EXISTS entities_fts USING fts5("
             "path UNINDEXED, name, content)"
