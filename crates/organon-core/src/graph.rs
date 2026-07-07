@@ -735,9 +735,11 @@ impl Graph {
 
     /// Return groups of entities that share the same non-null `content_hash`.
     pub fn exact_duplicates(&self) -> Result<Vec<DuplicateGroup>> {
+        // Exclude size-based pseudo-hashes: distinct large files of equal size
+        // collide on them and would be reported as false duplicates.
         let mut stmt = self.conn.prepare(
             "SELECT content_hash FROM entities
-             WHERE content_hash IS NOT NULL
+             WHERE content_hash IS NOT NULL AND content_hash NOT LIKE 'size:%'
              GROUP BY content_hash HAVING COUNT(*) > 1
              ORDER BY COUNT(*) DESC",
         )?;
@@ -1058,6 +1060,23 @@ mod tests {
         let (g, _f) = tmp_graph();
         g.upsert(&mk_entity("/solo.rs")).unwrap();
         assert!(g.exact_duplicates().unwrap().is_empty());
+    }
+
+    #[test]
+    fn exact_duplicates_ignores_size_pseudo_hashes() {
+        let (g, _f) = tmp_graph();
+        // Two distinct large files of equal size share a `size:N` pseudo-hash;
+        // they must NOT be reported as duplicates.
+        let mut a = mk_entity("/big_a.bin");
+        let mut b = mk_entity("/big_b.bin");
+        a.content_hash = Some("size:104857600".to_string());
+        b.content_hash = Some("size:104857600".to_string());
+        g.upsert(&a).unwrap();
+        g.upsert(&b).unwrap();
+        assert!(
+            g.exact_duplicates().unwrap().is_empty(),
+            "size-based pseudo-hashes must not count as duplicates"
+        );
     }
 
     // ── diagnostics ──────────────────────────────────────────────────────────

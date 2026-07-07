@@ -156,6 +156,11 @@ pub fn reconcile_renames(root: &str, graph: Arc<Mutex<Graph>>) -> Result<usize> 
     for e in all.iter().filter(|e| e.path.starts_with(&root_prefix)) {
         if std::path::Path::new(&e.path).exists() {
             if let Some(h) = &e.content_hash {
+                // Skip size-based pseudo-hashes: equal-size large files collide
+                // and would be reconciled as spurious renames.
+                if crate::entity::is_pseudo_hash(h) {
+                    continue;
+                }
                 hash_to_disk_paths
                     .entry(h.clone())
                     .or_default()

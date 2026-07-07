@@ -1,0 +1,7 @@
+{
+  "tool_name": "Bash",
+  "tool_input_preview": "{\"command\":\"ls Cargo.lock uv.lock LICENSE README.md CONTRIBUTING.md 2>&1; echo \\\"---docs---\\\"; ls -d docs 2>&1; echo \\\"---ai---\\\"; ls -d ai ai/tests tests 2>&1; echo \\\"---githubmeta---\\\"; ls .github/I...",
+  "error": "Exit code 1\nCONTRIBUTING.md\nCargo.lock\nLICENSE\nREADME.md\nuv.lock\n---docs---\ndocs\n---ai---\nai\nai/tests\ntests\n---githubmeta---\nls: .github/CODEOWNERS: No such file or directory\n.github/PULL_REQUEST_TEMPLATE.md\n\n.github/ISSUE_TEMPLATE:\nbug_report.md\nfeature_request.md",
+  "timestamp": "2026-07-07T23:23:20.586Z",
+  "retry_count": 2
+}

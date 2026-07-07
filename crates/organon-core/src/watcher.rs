@@ -82,6 +82,12 @@ impl RenameTracker {
     /// Returns `Some(old_path)` iff exactly one pending remove has `content_hash`
     /// and it is still within the time window.
     pub fn try_match(&mut self, new_path: &str, content_hash: &str) -> Option<String> {
+        // Size-based pseudo-hashes only encode byte length; two unrelated large
+        // files of equal size collide, so matching on them would treat a
+        // delete+create of distinct files as a rename and destroy identity.
+        if crate::entity::is_pseudo_hash(content_hash) {
+            return None;
+        }
         let entries = self.pending.get_mut(content_hash)?;
         let now = Instant::now();
 
