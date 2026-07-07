@@ -11,6 +11,7 @@ use crate::config::LifecycleConfig;
 use crate::entity::Entity;
 use crate::graph::Graph;
 use crate::ignore::{is_ignored_default, IgnoreSet};
+use crate::LockRecover;
 
 const MAX_FILE_SIZE: u64 = 100 * 1024 * 1024; // 100 MB
 
@@ -58,7 +59,7 @@ pub fn scan(
         }
 
         match Entity::from_path_with_options(&path_str, use_git_timestamps) {
-            Ok(entity) => match graph.lock().unwrap().upsert(&entity) {
+            Ok(entity) => match graph.lock_recover().upsert(&entity) {
                 Ok(_) => {
                     indexed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 }
@@ -96,7 +97,7 @@ pub fn refresh_lifecycle(graph: Arc<Mutex<Graph>>, lc: &LifecycleConfig) -> Resu
 
     let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64;
 
-    let entities = graph.lock().unwrap().all()?;
+    let entities = graph.lock_recover().all()?;
     let mut updated = 0;
 
     for mut entity in entities {
@@ -107,7 +108,7 @@ pub fn refresh_lifecycle(graph: Arc<Mutex<Graph>>, lc: &LifecycleConfig) -> Resu
         };
         if new_state != entity.lifecycle {
             entity.lifecycle = new_state;
-            graph.lock().unwrap().upsert(&entity)?;
+            graph.lock_recover().upsert(&entity)?;
             updated += 1;
         }
     }
@@ -149,7 +150,7 @@ pub fn reconcile_renames(root: &str, graph: Arc<Mutex<Graph>>) -> Result<usize> 
         .to_string_lossy()
         .to_string();
 
-    let all = graph.lock().unwrap().all()?;
+    let all = graph.lock_recover().all()?;
 
     // Group on-disk entities by content_hash (hash → paths that exist on FS).
     let mut hash_to_disk_paths: BTreeMap<String, Vec<String>> = BTreeMap::new();
@@ -196,15 +197,14 @@ pub fn reconcile_renames(root: &str, graph: Arc<Mutex<Graph>>) -> Result<usize> 
         let new_path = candidates[0];
         // Skip if the target already has its own entity (would be a conflict).
         if graph
-            .lock()
-            .unwrap()
+            .lock_recover()
             .get_by_path(new_path)?
             .map(|e| e.path != entity.path)
             .unwrap_or(false)
         {
             continue;
         }
-        match graph.lock().unwrap().rename_entity(&entity.path, new_path) {
+        match graph.lock_recover().rename_entity(&entity.path, new_path) {
             Ok(_) => {
                 info!("scan: rename continuity {} → {}", entity.path, new_path);
                 renames += 1;

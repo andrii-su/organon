@@ -976,7 +976,10 @@ mod tests {
 
         writer.upsert(&mk_entity("/concurrent.rs")).unwrap();
         let got = reader.get_by_path("/concurrent.rs").unwrap();
-        assert!(got.is_some(), "second connection must see the committed write");
+        assert!(
+            got.is_some(),
+            "second connection must see the committed write"
+        );
     }
 
     // ── truncate_on_char_boundary / update_fts ──────────────────────────────
