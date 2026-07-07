@@ -58,10 +58,33 @@ def test_sensitive_filename_patterns(path):
         "/home/user/.aws/credentials",
         "/home/user/.aws/config",
         "/home/user/project/secrets/db_password.txt",
+        # multi-component sensitive dir — regression for .config/gcloud
+        "/home/user/.config/gcloud/credentials.db",
+        "/home/user/.config/gcloud/access_tokens.db",
     ],
 )
 def test_sensitive_directory_patterns(path):
     assert is_sensitive(path), f"expected {path!r} to be sensitive"
+
+
+# ── case-insensitivity (macOS / case-insensitive volumes) ─────────────────────
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/home/user/project/KEY.PEM",
+        "/home/user/project/Server.Key",
+        "/home/user/project/.Env.Production",
+        "/home/user/project/SECRETS.JSON",
+        "/home/user/project/Credentials",
+        "/home/user/ID_RSA",
+        "/home/user/.SSH/known_hosts",  # uppercased sensitive dir
+        "/home/user/.Config/GCloud/creds.db",  # uppercased multi-component dir
+    ],
+)
+def test_sensitive_case_insensitive(path):
+    assert is_sensitive(path), f"expected {path!r} to be sensitive (case-insensitive)"
 
 
 # ── non-sensitive paths ───────────────────────────────────────────────────────
