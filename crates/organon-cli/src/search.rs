@@ -145,7 +145,10 @@ pub fn search_entities(params: SearchParams) -> Result<SearchPage> {
             "db_path": params.config.indexer.vectors_path,
             "path_prefix": path_prefix,
         });
-        let output = python_run_with_env(&["-m", "ai.bridge"], &bridge_env(params.config, &bridge_args))?;
+        let output = python_run_with_env(
+            &["-m", "ai.bridge"],
+            &bridge_env(params.config, &bridge_args),
+        )?;
         let results: Vec<serde_json::Value> = serde_json::from_str(&output)?;
         let weight = if matches!(params.mode, SearchMode::Hybrid) {
             0.7

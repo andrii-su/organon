@@ -90,7 +90,7 @@ def test_run_once_indexes_new_files(tmp_db, tmp_path):
     with (
         patch("ai.indexer.extract_text", return_value="some content"),
         patch("ai.indexer.index_file") as mock_index,
-        patch("ai.indexer.get_indexed_hashes", return_value=set()),
+        patch("ai.indexer.get_all_entries", return_value=[]),
         patch("ai.indexer.extract_relations", return_value=[]),
         patch("ai.indexer.upsert_relations"),
     ):
@@ -105,7 +105,10 @@ def test_run_once_skips_already_indexed(tmp_db):
     with (
         patch("ai.indexer.extract_text", return_value="content"),
         patch("ai.indexer.index_file") as mock_index,
-        patch("ai.indexer.get_indexed_hashes", return_value=already),
+        patch(
+            "ai.indexer.get_all_entries",
+            return_value=[{"path": "/src/main.py", "content_hash": "hash_main"}],
+        ),
         patch("ai.indexer.extract_relations", return_value=[]),
         patch("ai.indexer.upsert_relations"),
     ):
@@ -122,7 +125,7 @@ def test_run_once_skips_no_text(tmp_db):
     with (
         patch("ai.indexer.extract_text", return_value=None),
         patch("ai.indexer.index_file") as mock_index,
-        patch("ai.indexer.get_indexed_hashes", return_value=set()),
+        patch("ai.indexer.get_all_entries", return_value=[]),
         patch("ai.indexer.extract_relations", return_value=[]),
         patch("ai.indexer.upsert_relations"),
     ):
@@ -137,7 +140,7 @@ def test_run_once_skips_empty_text(tmp_db):
     with (
         patch("ai.indexer.extract_text", return_value="   \n  "),
         patch("ai.indexer.index_file") as mock_index,
-        patch("ai.indexer.get_indexed_hashes", return_value=set()),
+        patch("ai.indexer.get_all_entries", return_value=[]),
         patch("ai.indexer.extract_relations", return_value=[]),
         patch("ai.indexer.upsert_relations"),
     ):
@@ -150,7 +153,7 @@ def test_run_once_counts_errors(tmp_db):
     with (
         patch("ai.indexer.extract_text", return_value="content"),
         patch("ai.indexer.index_file", side_effect=RuntimeError("embed failed")),
-        patch("ai.indexer.get_indexed_hashes", return_value=set()),
+        patch("ai.indexer.get_all_entries", return_value=[]),
         patch("ai.indexer.extract_relations", return_value=[]),
         patch("ai.indexer.upsert_relations"),
     ):
@@ -165,7 +168,7 @@ def test_run_once_extracts_relations(tmp_db):
     with (
         patch("ai.indexer.extract_text", return_value="content"),
         patch("ai.indexer.index_file"),
-        patch("ai.indexer.get_indexed_hashes", return_value=set()),
+        patch("ai.indexer.get_all_entries", return_value=[]),
         patch("ai.indexer.extract_relations", return_value=fake_rels),
         patch("ai.indexer.upsert_relations") as mock_upsert,
     ):
@@ -181,7 +184,7 @@ def test_run_once_replaces_stale_outgoing_relations(tmp_db):
     with (
         patch("ai.indexer.extract_text", return_value="content"),
         patch("ai.indexer.index_file"),
-        patch("ai.indexer.get_indexed_hashes", return_value=set()),
+        patch("ai.indexer.get_all_entries", return_value=[]),
         patch("ai.indexer.extract_relations", return_value=[("/src/main.py", "/src/utils.py", "imports")]),
     ):
         run_once(tmp_db)
@@ -197,7 +200,13 @@ def test_run_once_replaces_stale_outgoing_relations(tmp_db):
     with (
         patch("ai.indexer.extract_text", return_value="content changed"),
         patch("ai.indexer.index_file"),
-        patch("ai.indexer.get_indexed_hashes", return_value={"hash_main", "hash_utils"}),
+        patch(
+            "ai.indexer.get_all_entries",
+            return_value=[
+                {"path": "/src/main.py", "content_hash": "hash_main"},
+                {"path": "/src/utils.py", "content_hash": "hash_utils"},
+            ],
+        ),
         patch("ai.indexer.extract_relations", return_value=[("/src/main.py", "/src/other.py", "imports")]),
     ):
         run_once(tmp_db)
@@ -214,7 +223,7 @@ def test_run_once_returns_all_stat_keys(tmp_db):
     with (
         patch("ai.indexer.extract_text", return_value="x"),
         patch("ai.indexer.index_file"),
-        patch("ai.indexer.get_indexed_hashes", return_value=set()),
+        patch("ai.indexer.get_all_entries", return_value=[]),
         patch("ai.indexer.extract_relations", return_value=[]),
         patch("ai.indexer.upsert_relations"),
     ):
@@ -227,7 +236,7 @@ def test_run_once_updates_fts(tmp_db):
     with (
         patch("ai.indexer.extract_text", return_value="Rust graph and SQLite index"),
         patch("ai.indexer.index_file"),
-        patch("ai.indexer.get_indexed_hashes", return_value=set()),
+        patch("ai.indexer.get_all_entries", return_value=[]),
         patch("ai.indexer.extract_relations", return_value=[]),
         patch("ai.indexer.upsert_relations"),
     ):
@@ -243,7 +252,13 @@ def test_run_once_backfills_fts_when_vectors_already_exist(tmp_db):
     with (
         patch("ai.indexer.extract_text", return_value="content"),
         patch("ai.indexer.index_file") as mock_index,
-        patch("ai.indexer.get_indexed_hashes", return_value={"hash_main", "hash_utils"}),
+        patch(
+            "ai.indexer.get_all_entries",
+            return_value=[
+                {"path": "/src/main.py", "content_hash": "hash_main"},
+                {"path": "/src/utils.py", "content_hash": "hash_utils"},
+            ],
+        ),
         patch("ai.indexer.extract_relations", return_value=[]),
         patch("ai.indexer.upsert_relations"),
     ):
@@ -269,7 +284,7 @@ def test_run_once_scopes_to_path_prefix(tmp_db):
     with (
         patch("ai.indexer.extract_text", return_value="content"),
         patch("ai.indexer.index_file") as mock_index,
-        patch("ai.indexer.get_indexed_hashes", return_value=set()),
+        patch("ai.indexer.get_all_entries", return_value=[]),
         patch("ai.indexer.extract_relations", return_value=[]),
         patch("ai.indexer.upsert_relations"),
     ):
