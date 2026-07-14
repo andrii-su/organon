@@ -101,7 +101,6 @@ def test_run_once_indexes_new_files(tmp_db, tmp_path):
 
 
 def test_run_once_skips_already_indexed(tmp_db):
-    already = {"hash_main"}  # main.py already in vector store
     with (
         patch("ai.indexer.extract_text", return_value="content"),
         patch("ai.indexer.index_file") as mock_index,
