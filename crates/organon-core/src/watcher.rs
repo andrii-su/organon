@@ -282,8 +282,17 @@ fn buffer_remove(path: &Path, graph: &Arc<Mutex<Graph>>, tracker: &mut RenameTra
 
     match hash_opt {
         Some(hash) => {
-            info!("buffering remove for rename detection: {path_str}");
-            tracker.push(path_str, hash);
+            if crate::entity::is_pseudo_hash(&hash) {
+                // Size-based pseudo-hashes are intentionally excluded from
+                // rename matching; delete immediately instead of buffering.
+                match graph.lock_recover().delete_by_path(&path_str) {
+                    Ok(_) => info!("removed entity: {path_str}"),
+                    Err(e) => warn!("delete error {path_str}: {e:?}"),
+                }
+            } else {
+                info!("buffering remove for rename detection: {path_str}");
+                tracker.push(path_str, hash);
+            }
         }
         None => {
             // No hash or entity unknown — delete immediately

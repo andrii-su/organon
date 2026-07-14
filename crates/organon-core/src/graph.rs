@@ -7,7 +7,7 @@ use log::{debug, info, warn};
 use rusqlite::{params, params_from_iter, types::Value, Connection};
 use serde::{Deserialize, Serialize};
 
-use crate::entity::{Entity, LifecycleState};
+use crate::entity::{Entity, LifecycleState, PSEUDO_HASH_PREFIX};
 
 /// A single audit entry in the entity history log.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -745,14 +745,15 @@ impl Graph {
     pub fn exact_duplicates(&self) -> Result<Vec<DuplicateGroup>> {
         // Exclude size-based pseudo-hashes: distinct large files of equal size
         // collide on them and would be reported as false duplicates.
+        let pseudo_hash_like = format!("{PSEUDO_HASH_PREFIX}%");
         let mut stmt = self.conn.prepare(
             "SELECT content_hash FROM entities
-             WHERE content_hash IS NOT NULL AND content_hash NOT LIKE 'size:%'
+             WHERE content_hash IS NOT NULL AND content_hash NOT LIKE ?1
              GROUP BY content_hash HAVING COUNT(*) > 1
              ORDER BY COUNT(*) DESC",
         )?;
         let hashes: Vec<String> = stmt
-            .query_map([], |row| row.get(0))?
+            .query_map([pseudo_hash_like], |row| row.get(0))?
             .filter_map(|r| r.ok())
             .collect();
 
@@ -966,9 +967,9 @@ mod tests {
     }
 
     #[test]
-    fn two_connections_can_write_and_read_concurrently() {
-        // Open a second Graph on the same file; a write on one must be visible
-        // to the other without a SQLITE_BUSY "database is locked" error.
+    fn two_connections_can_write_and_read() {
+        // Open a second Graph on the same file; a committed write on one
+        // connection must be visible to the other.
         let f = NamedTempFile::new().unwrap();
         let path = f.path().to_str().unwrap();
         let writer = Graph::open(path).unwrap();
