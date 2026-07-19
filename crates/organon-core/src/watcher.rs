@@ -11,6 +11,7 @@ use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watche
 use crate::entity::Entity;
 use crate::graph::Graph;
 use crate::ignore::IgnoreSet;
+use crate::LockRecover;
 
 // ── public types ──────────────────────────────────────────────────────────────
 
@@ -82,6 +83,12 @@ impl RenameTracker {
     /// Returns `Some(old_path)` iff exactly one pending remove has `content_hash`
     /// and it is still within the time window.
     pub fn try_match(&mut self, new_path: &str, content_hash: &str) -> Option<String> {
+        // Size-based pseudo-hashes only encode byte length; two unrelated large
+        // files of equal size collide, so matching on them would treat a
+        // delete+create of distinct files as a rename and destroy identity.
+        if crate::entity::is_pseudo_hash(content_hash) {
+            return None;
+        }
         let entries = self.pending.get_mut(content_hash)?;
         let now = Instant::now();
 
@@ -117,7 +124,7 @@ impl RenameTracker {
         }
 
         for (hash, path) in &to_delete {
-            match graph.lock().unwrap().delete_by_path(path) {
+            match graph.lock_recover().delete_by_path(path) {
                 Ok(_) => info!("removed entity (expired rename window): {path}"),
                 Err(e) => warn!("delete error {path}: {e:?}"),
             }
@@ -250,7 +257,7 @@ fn handle_event(
             for path in &event.paths {
                 if path.is_file() && !is_ignored_for_roots(roots, path) {
                     let path_str = path.to_string_lossy();
-                    if let Err(e) = graph.lock().unwrap().touch_accessed(&path_str, now) {
+                    if let Err(e) = graph.lock_recover().touch_accessed(&path_str, now) {
                         warn!("touch_accessed error {path_str}: {e:?}");
                     }
                 }
@@ -267,8 +274,7 @@ fn buffer_remove(path: &Path, graph: &Arc<Mutex<Graph>>, tracker: &mut RenameTra
     let path_str = path.to_string_lossy().to_string();
 
     let hash_opt = graph
-        .lock()
-        .unwrap()
+        .lock_recover()
         .get_by_path(&path_str)
         .ok()
         .flatten()
@@ -276,12 +282,21 @@ fn buffer_remove(path: &Path, graph: &Arc<Mutex<Graph>>, tracker: &mut RenameTra
 
     match hash_opt {
         Some(hash) => {
-            info!("buffering remove for rename detection: {path_str}");
-            tracker.push(path_str, hash);
+            if crate::entity::is_pseudo_hash(&hash) {
+                // Size-based pseudo-hashes are intentionally excluded from
+                // rename matching; delete immediately instead of buffering.
+                match graph.lock_recover().delete_by_path(&path_str) {
+                    Ok(_) => info!("removed entity: {path_str}"),
+                    Err(e) => warn!("delete error {path_str}: {e:?}"),
+                }
+            } else {
+                info!("buffering remove for rename detection: {path_str}");
+                tracker.push(path_str, hash);
+            }
         }
         None => {
             // No hash or entity unknown — delete immediately
-            match graph.lock().unwrap().delete_by_path(&path_str) {
+            match graph.lock_recover().delete_by_path(&path_str) {
                 Ok(_) => info!("removed entity: {path_str}"),
                 Err(e) => warn!("delete error {path_str}: {e:?}"),
             }
@@ -312,12 +327,12 @@ fn handle_create(
     if let Some(ref hash) = entity.content_hash {
         if let Some(old_path) = tracker.try_match(&path_str, hash) {
             info!("detected rename: {old_path} → {path_str}");
-            match graph.lock().unwrap().rename_entity(&old_path, &path_str) {
+            match graph.lock_recover().rename_entity(&old_path, &path_str) {
                 Ok(outcome) => {
                     info!("rename applied ({outcome:?}): {old_path} → {path_str}");
                     // Also update mtime/size via upsert to reflect any metadata change.
                     // The id / summary / lifecycle are preserved by rename_entity.
-                    if let Err(e) = graph.lock().unwrap().upsert(&entity) {
+                    if let Err(e) = graph.lock_recover().upsert(&entity) {
                         warn!("post-rename upsert error {path_str}: {e:?}");
                     }
                     return;
@@ -338,7 +353,7 @@ fn do_rename(old: &Path, new: &Path, graph: &Arc<Mutex<Graph>>, use_git_timestam
     let old_str = old.to_string_lossy();
     let new_str = new.to_string_lossy();
 
-    match graph.lock().unwrap().rename_entity(&old_str, &new_str) {
+    match graph.lock_recover().rename_entity(&old_str, &new_str) {
         Ok(outcome) => {
             info!(
                 "native rename applied ({:?}): {} → {}",
@@ -349,7 +364,7 @@ fn do_rename(old: &Path, new: &Path, graph: &Arc<Mutex<Graph>>, use_git_timestam
             // Update metadata (mtime, size) at new path
             if new.is_file() {
                 if let Ok(entity) = Entity::from_path_with_options(&new_str, use_git_timestamps) {
-                    if let Err(e) = graph.lock().unwrap().upsert(&entity) {
+                    if let Err(e) = graph.lock_recover().upsert(&entity) {
                         warn!("post-rename upsert error {new_str}: {e:?}");
                     }
                 }
@@ -366,7 +381,7 @@ fn do_rename(old: &Path, new: &Path, graph: &Arc<Mutex<Graph>>, use_git_timestam
 
 fn upsert_entity(entity: Entity, graph: &Arc<Mutex<Graph>>) {
     let path = entity.path.clone();
-    match graph.lock().unwrap().upsert(&entity) {
+    match graph.lock_recover().upsert(&entity) {
         Ok(_) => info!("upserted entity: {path}"),
         Err(e) => warn!("upsert error {path}: {e:?}"),
     }

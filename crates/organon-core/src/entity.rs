@@ -130,13 +130,26 @@ impl Entity {
 
 const MAX_HASH_SIZE: u64 = 100 * 1024 * 1024; // 100 MB
 
+/// Prefix marking a size-based pseudo-hash (used for files too large to hash).
+/// Pseudo-hashes only encode byte length, so two distinct files of equal size
+/// collide. They MUST NOT be treated as content-equal for rename detection or
+/// duplicate detection — see [`is_pseudo_hash`].
+pub const PSEUDO_HASH_PREFIX: &str = "size:";
+
+/// Returns true if `hash` is a size-based pseudo-hash rather than a real
+/// content digest. Such hashes are unreliable for equality and must be excluded
+/// from rename/duplicate matching.
+pub fn is_pseudo_hash(hash: &str) -> bool {
+    hash.starts_with(PSEUDO_HASH_PREFIX)
+}
+
 fn hash_file(path: &Path) -> Result<String> {
     use std::io::{BufReader, Read};
 
     let meta = std::fs::metadata(path)?;
     if meta.len() > MAX_HASH_SIZE {
         // Return a size-based pseudo-hash to avoid loading huge files into RAM
-        return Ok(format!("size:{}", meta.len()));
+        return Ok(format!("{PSEUDO_HASH_PREFIX}{}", meta.len()));
     }
 
     let file = std::fs::File::open(path)?;

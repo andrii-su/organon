@@ -7,7 +7,7 @@ use log::{debug, info, warn};
 use rusqlite::{params, params_from_iter, types::Value, Connection};
 use serde::{Deserialize, Serialize};
 
-use crate::entity::{Entity, LifecycleState};
+use crate::entity::{Entity, LifecycleState, PSEUDO_HASH_PREFIX};
 
 /// A single audit entry in the entity history log.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -81,6 +81,14 @@ impl Graph {
     pub fn open(db_path: &str) -> Result<Self> {
         debug!("opening graph db: {db_path}");
         let conn = Connection::open(db_path)?;
+        // The watch daemon writes continuously while the MCP server and CLI open
+        // their own connections to the same file. Without WAL + a busy timeout,
+        // concurrent access fails immediately with SQLITE_BUSY ("database is
+        // locked"). WAL lets readers and a writer coexist; the busy timeout makes
+        // contending writers block-and-retry instead of erroring out.
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
+        conn.pragma_update(None, "journal_mode", "WAL")?;
+        conn.pragma_update(None, "synchronous", "NORMAL")?;
         let graph = Self { conn };
         graph.migrate()?;
         Ok(graph)
@@ -652,7 +660,7 @@ impl Graph {
             .execute("DELETE FROM entities_fts WHERE path = ?1", params![path])?;
         self.conn.execute(
             "INSERT INTO entities_fts(path, name, content) VALUES (?1, ?2, ?3)",
-            params![path, name, &content[..content.len().min(4000)]],
+            params![path, name, truncate_on_char_boundary(content, 4000)],
         )?;
         Ok(())
     }
@@ -735,14 +743,17 @@ impl Graph {
 
     /// Return groups of entities that share the same non-null `content_hash`.
     pub fn exact_duplicates(&self) -> Result<Vec<DuplicateGroup>> {
+        // Exclude size-based pseudo-hashes: distinct large files of equal size
+        // collide on them and would be reported as false duplicates.
+        let pseudo_hash_like = format!("{PSEUDO_HASH_PREFIX}%");
         let mut stmt = self.conn.prepare(
             "SELECT content_hash FROM entities
-             WHERE content_hash IS NOT NULL
+             WHERE content_hash IS NOT NULL AND content_hash NOT LIKE ?1
              GROUP BY content_hash HAVING COUNT(*) > 1
              ORDER BY COUNT(*) DESC",
         )?;
         let hashes: Vec<String> = stmt
-            .query_map([], |row| row.get(0))?
+            .query_map([pseudo_hash_like], |row| row.get(0))?
             .filter_map(|r| r.ok())
             .collect();
 
@@ -790,6 +801,20 @@ impl Graph {
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
+
+/// Truncate `s` to at most `max_bytes` bytes without splitting a UTF-8
+/// character. Returns the largest prefix whose byte length is `<= max_bytes`.
+fn truncate_on_char_boundary(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes {
+        return s;
+    }
+    // Walk back from max_bytes until we land on a char boundary.
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
 
 fn row_to_entity(row: &rusqlite::Row<'_>) -> rusqlite::Result<Entity> {
     Ok(Entity {
@@ -929,6 +954,61 @@ mod tests {
         }
     }
 
+    // ── concurrency ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn wal_mode_is_enabled() {
+        let (g, _f) = tmp_graph();
+        let mode: String = g
+            .conn
+            .query_row("PRAGMA journal_mode", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(mode.to_lowercase(), "wal");
+    }
+
+    #[test]
+    fn two_connections_can_write_and_read() {
+        // Open a second Graph on the same file; a committed write on one
+        // connection must be visible to the other.
+        let f = NamedTempFile::new().unwrap();
+        let path = f.path().to_str().unwrap();
+        let writer = Graph::open(path).unwrap();
+        let reader = Graph::open(path).unwrap();
+
+        writer.upsert(&mk_entity("/concurrent.rs")).unwrap();
+        let got = reader.get_by_path("/concurrent.rs").unwrap();
+        assert!(
+            got.is_some(),
+            "second connection must see the committed write"
+        );
+    }
+
+    // ── truncate_on_char_boundary / update_fts ──────────────────────────────
+
+    #[test]
+    fn truncate_never_splits_multibyte_char() {
+        // "é" is 2 bytes (U+00E9). A 4001-char string of "é" is 8002 bytes;
+        // cutting at 4000 bytes lands mid-char with a naive byte slice.
+        let s = "é".repeat(4001);
+        let out = truncate_on_char_boundary(&s, 4000);
+        assert!(out.len() <= 4000);
+        assert!(s.is_char_boundary(out.len()));
+        // Result is valid UTF-8 by construction (it's a &str), so just re-derive.
+        assert_eq!(out.len() % 2, 0); // whole "é" chars only
+    }
+
+    #[test]
+    fn truncate_shorter_than_limit_is_identity() {
+        assert_eq!(truncate_on_char_boundary("hello", 4000), "hello");
+    }
+
+    #[test]
+    fn update_fts_with_multibyte_content_does_not_panic() {
+        let (g, _f) = tmp_graph();
+        let content = "日本語テスト".repeat(1000); // multi-byte, > 4000 bytes
+        g.update_fts("a/b.rs", "b.rs", &content).unwrap();
+    }
+
     // ── reverse_deps ─────────────────────────────────────────────────────────
 
     #[test]
@@ -1018,6 +1098,23 @@ mod tests {
         let (g, _f) = tmp_graph();
         g.upsert(&mk_entity("/solo.rs")).unwrap();
         assert!(g.exact_duplicates().unwrap().is_empty());
+    }
+
+    #[test]
+    fn exact_duplicates_ignores_size_pseudo_hashes() {
+        let (g, _f) = tmp_graph();
+        // Two distinct large files of equal size share a `size:N` pseudo-hash;
+        // they must NOT be reported as duplicates.
+        let mut a = mk_entity("/big_a.bin");
+        let mut b = mk_entity("/big_b.bin");
+        a.content_hash = Some("size:104857600".to_string());
+        b.content_hash = Some("size:104857600".to_string());
+        g.upsert(&a).unwrap();
+        g.upsert(&b).unwrap();
+        assert!(
+            g.exact_duplicates().unwrap().is_empty(),
+            "size-based pseudo-hashes must not count as duplicates"
+        );
     }
 
     // ── diagnostics ──────────────────────────────────────────────────────────

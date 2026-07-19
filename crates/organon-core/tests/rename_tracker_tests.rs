@@ -111,6 +111,18 @@ fn same_path_push_and_match_is_guarded() {
 }
 
 #[test]
+fn size_pseudo_hash_never_matches_as_rename() {
+    // Two distinct large files of equal byte length share a `size:N` pseudo-hash.
+    // Matching on it would wrongly treat delete+create as a rename and destroy
+    // one entity's identity/history.
+    let mut tracker = RenameTrackerHandle::new(Duration::from_secs(5));
+    tracker.push("/tmp/big_a.bin".to_string(), "size:104857600".to_string());
+
+    let matched = tracker.try_match("/tmp/big_b.bin", "size:104857600");
+    assert_eq!(matched, None, "size-based pseudo-hash must not auto-match");
+}
+
+#[test]
 fn flush_expired_deletes_from_graph() {
     let (graph, _f) = temp_graph();
 

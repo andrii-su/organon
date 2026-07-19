@@ -92,6 +92,15 @@ pub fn python_env(config: &OrgConfig) -> Vec<(String, String)> {
     ]
 }
 
+/// Build the environment for a `python -m ai.bridge` call: the standard python
+/// env plus the JSON request in ORGANON_BRIDGE_ARGS. Passing arguments this way
+/// keeps user-controlled strings (queries, paths) out of Python source entirely.
+pub fn bridge_env(config: &OrgConfig, args: &serde_json::Value) -> Vec<(String, String)> {
+    let mut env = python_env(config);
+    env.push(("ORGANON_BRIDGE_ARGS".to_string(), args.to_string()));
+    env
+}
+
 pub fn default_search_mode(config: &OrgConfig) -> SearchMode {
     match config.search.default_mode.as_str() {
         "fts" => SearchMode::Fts,
@@ -129,22 +138,16 @@ pub fn search_entities(params: SearchParams) -> Result<SearchPage> {
     };
 
     if matches!(params.mode, SearchMode::Vector | SearchMode::Hybrid) {
+        let bridge_args = serde_json::json!({
+            "op": "search",
+            "query": params.query,
+            "limit": candidate_limit,
+            "db_path": params.config.indexer.vectors_path,
+            "path_prefix": path_prefix,
+        });
         let output = python_run_with_env(
-            &[
-                "-c",
-                &format!(
-                    "from ai.embeddings.store import search; import json; \
-                     print(json.dumps(search({:?}, limit={}, db_path={:?}, path_prefix={})))",
-                    params.query,
-                    candidate_limit,
-                    params.config.indexer.vectors_path,
-                    path_prefix
-                        .as_ref()
-                        .map(|p| format!("{p:?}"))
-                        .unwrap_or_else(|| "None".to_string())
-                ),
-            ],
-            &python_env(params.config),
+            &["-m", "ai.bridge"],
+            &bridge_env(params.config, &bridge_args),
         )?;
         let results: Vec<serde_json::Value> = serde_json::from_str(&output)?;
         let weight = if matches!(params.mode, SearchMode::Hybrid) {
@@ -450,23 +453,14 @@ pub fn search_by_example(
     let canonical = std::fs::canonicalize(like_path).unwrap_or_else(|_| PathBuf::from(like_path));
     let path_str = canonical.to_string_lossy().to_string();
 
-    let output = python_run_with_env(
-        &[
-            "-c",
-            &format!(
-                "from ai.embeddings.store import search_by_path; import json; \
-                 print(json.dumps(search_by_path({:?}, limit={}, db_path={:?}, path_prefix={})))",
-                path_str,
-                (limit + offset).max(1),
-                config.indexer.vectors_path,
-                path_prefix
-                    .as_ref()
-                    .map(|p| format!("{p:?}"))
-                    .unwrap_or_else(|| "None".to_string()),
-            ),
-        ],
-        &python_env(config),
-    )?;
+    let bridge_args = serde_json::json!({
+        "op": "search_by_path",
+        "path": path_str,
+        "limit": (limit + offset).max(1),
+        "db_path": config.indexer.vectors_path,
+        "path_prefix": path_prefix,
+    });
+    let output = python_run_with_env(&["-m", "ai.bridge"], &bridge_env(config, &bridge_args))?;
 
     let results: Vec<serde_json::Value> = serde_json::from_str(&output)?;
     let total = results.len();

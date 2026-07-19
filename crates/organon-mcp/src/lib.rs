@@ -604,19 +604,13 @@ impl McpService {
         let path = normalize_request_path(path);
         self.ensure_in_scope(&path)?;
         let path_prefix = self.effective_prefix(path_prefix)?;
-        let output = self.python_run(&[
-            "-c",
-            &format!(
-                "from ai.embeddings.store import search_by_path; import json; \
-                 print(json.dumps(search_by_path({:?}, limit={limit}, db_path={:?}, path_prefix={})))",
-                path,
-                self.config.indexer.vectors_path,
-                path_prefix
-                    .as_deref()
-                    .map(|p| format!("{p:?}"))
-                    .unwrap_or_else(|| "None".to_string()),
-            ),
-        ])?;
+        let output = self.python_bridge(&serde_json::json!({
+            "op": "search_by_path",
+            "path": path,
+            "limit": limit,
+            "db_path": self.config.indexer.vectors_path,
+            "path_prefix": path_prefix,
+        }))?;
         let rows: Vec<serde_json::Value> = serde_json::from_str(&output)?;
         Ok(rows
             .into_iter()
@@ -897,14 +891,10 @@ impl McpService {
     pub fn get_file_content(&self, path: &str) -> Result<FileContent> {
         let path = normalize_request_path(path);
         self.ensure_in_scope(&path)?;
-        let output = self.python_run(&[
-            "-c",
-            &format!(
-                "from ai.extractor.extract import extract_text; import json; \
-                 text = extract_text({path:?}); \
-                 print(json.dumps({{'path': {path:?}, 'content': text or '', 'chars': len(text or '')}}))"
-            ),
-        ])?;
+        let output = self.python_bridge(&serde_json::json!({
+            "op": "extract_text",
+            "path": path,
+        }))?;
         let result: FileContent = serde_json::from_str(&output)?;
         Ok(result)
     }
@@ -945,17 +935,13 @@ impl McpService {
         limit: usize,
         path_prefix: Option<&str>,
     ) -> Result<Vec<VectorRow>> {
-        let output = self.python_run(&[
-            "-c",
-            &format!(
-                "from ai.embeddings.store import search; import json; \
-                 print(json.dumps(search({query:?}, limit={limit}, db_path={:?}, path_prefix={})))",
-                self.config.indexer.vectors_path,
-                path_prefix
-                    .map(|p| format!("{p:?}"))
-                    .unwrap_or_else(|| "None".to_string())
-            ),
-        ])?;
+        let output = self.python_bridge(&serde_json::json!({
+            "op": "search",
+            "query": query,
+            "limit": limit,
+            "db_path": self.config.indexer.vectors_path,
+            "path_prefix": path_prefix,
+        }))?;
         Ok(serde_json::from_str(&output)?)
     }
 
@@ -1022,11 +1008,15 @@ impl McpService {
         PathBuf::from(home).join("saved_queries.json")
     }
 
-    fn python_run(&self, args: &[&str]) -> Result<String> {
+    /// Invoke the Python AI layer via the argument-safe bridge. The request is
+    /// passed as JSON in ORGANON_BRIDGE_ARGS rather than interpolated into a
+    /// `python -c` snippet, so user-controlled strings never reach Python source.
+    fn python_bridge(&self, args: &serde_json::Value) -> Result<String> {
         let mut cmd = Command::new(self.python_bin());
-        cmd.args(args)
+        cmd.args(["-m", "ai.bridge"])
             .env("ORGANON_VECTORS_DB", &self.config.indexer.vectors_path)
-            .env("ORGANON_EMBED_MODEL", &self.config.indexer.embed_model);
+            .env("ORGANON_EMBED_MODEL", &self.config.indexer.embed_model)
+            .env("ORGANON_BRIDGE_ARGS", args.to_string());
         let out = cmd.output()?;
         if !out.status.success() {
             bail!(
@@ -1292,7 +1282,7 @@ impl ServerHandler for OrganonMcpServer {
         _context: RequestContext<RoleServer>,
     ) -> std::result::Result<ListResourcesResult, McpError> {
         Ok(ListResourcesResult {
-            resources: vec![RawResource::new("organon://entities", "entities").no_annotation()],
+            resources: vec![Resource::new("organon://entities", "entities")],
             next_cursor: None,
             meta: None,
         })
