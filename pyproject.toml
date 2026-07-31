@@ -16,7 +16,7 @@ organon-indexer = "ai.indexer:main"
 
 [dependency-groups]
 dev = [
-    "pre-commit>=4.6.0",
+    "pre-commit>=4.6.1",
     "pytest>=9.1.1",
 ]
 
