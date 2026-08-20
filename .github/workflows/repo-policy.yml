@@ -65,6 +65,15 @@ jobs:
           fetch-depth: 0
 
       - name: Validate commit messages
-        uses: wagoid/commitlint-github-action@v6
+        uses: actions/setup-node@v5
         with:
-          configFile: .commitlintrc.yml
+          node-version: "lts/*"
+
+      - name: Install commitlint
+        run: npm install --global @commitlint/cli@20 @commitlint/config-conventional@20
+
+      - name: Validate commit messages
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: commitlint --config .commitlintrc.yml --from "$BASE_SHA" --to "$HEAD_SHA" --verbose
