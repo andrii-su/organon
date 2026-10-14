@@ -93,7 +93,7 @@ risk: high — 7 dependents, 3 direct
 
 ## Install
 
-Requires **Rust stable**, **Python 3.12+**, and [`uv`](https://docs.astral.sh/uv/).
+Requires **Rust stable**, **Python 3.11+**, and [`uv`](https://docs.astral.sh/uv/).
 
 ```bash
 git clone https://github.com/andrii-su/organon.git

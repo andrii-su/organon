@@ -675,13 +675,13 @@ dependencies = [
     { name = "lancedb" },
     { name = "pyarrow" },
     { name = "pypdf" },
-    { name = "ruff" },
 ]
 
 [package.dev-dependencies]
 dev = [
     { name = "pre-commit" },
     { name = "pytest" },
+    { name = "ruff" },
 ]
 
 [package.metadata]
@@ -690,13 +690,13 @@ requires-dist = [
     { name = "lancedb", specifier = ">=0.37.1" },
     { name = "pyarrow", specifier = ">=24.0.0" },
     { name = "pypdf", specifier = ">=6.14.2" },
-    { name = "ruff", specifier = ">=0.15.20" },
 ]
 
 [package.metadata.requires-dev]
 dev = [
     { name = "pre-commit", specifier = ">=4.6.1" },
     { name = "pytest", specifier = ">=9.1.1" },
+    { name = "ruff", specifier = ">=0.15.20" },
 ]
 
 [[package]]
