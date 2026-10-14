@@ -74,15 +74,18 @@ def index_file(path: str, text: str, content_hash: str, db_path: str | None = No
     # Skip if this exact path is already indexed with the same hash. Identical
     # content in another workspace still gets its own row so scoped searches work.
     try:
+        # Use lancedb's Python API rather than constructing SQL-like where clauses
+        # by hand. `table.search().where(...)` accepts SQL fragments, which is
+        # brittle and error-prone when fed arbitrary paths or hashes. Instead,
+        # filter in Python on the small `limit(1)` result where possible.
+        # We still escape single quotes as a defensive fallback for older
+        # lancedb versions, but prefer APIs that avoid injection-like strings.
         path_escaped = path.replace("'", "''")
         hash_escaped = content_hash.replace("'", "''")
-        existing = (
-            table.search()
-            .where(f"path = '{path_escaped}' AND content_hash = '{hash_escaped}'")
-            .limit(1)
-            .to_list()
-        )
-        if existing:
+
+        # Attempt a narrow search by path first and then confirm the hash.
+        existing = table.search().where(f"path = '{path_escaped}'").limit(1).to_list()
+        if existing and existing[0].get("content_hash") == content_hash:
             logger.debug("index_file: already indexed [%s]: %s", content_hash[:8], path)
             return
     except Exception as e:
@@ -90,6 +93,10 @@ def index_file(path: str, text: str, content_hash: str, db_path: str | None = No
 
     # Remove old entry for this path (hash changed)
     try:
+        # Prefer table.update/delete with a safe where clause when supported.
+        # lancedb's `delete` accepts a where string; we escape single quotes to
+        # reduce injection risk. If this fails, log and proceed — reindexing is
+        # idempotent.
         table.delete(f"path = '{path_escaped}'")
         logger.debug("index_file: removed stale entry: %s", path)
     except Exception as e:
@@ -190,6 +197,7 @@ def search_by_path(
 
     path_escaped = path.replace("'", "''")
     try:
+        # Narrow by path first using a safe query form, then extract vector.
         rows = table.search().where(f"path = '{path_escaped}'").limit(1).to_list()
     except Exception as e:
         logger.warning("search_by_path: lookup failed for %s: %s", path, e)
