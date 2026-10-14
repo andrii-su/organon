@@ -8,7 +8,6 @@ dependencies = [
     "lancedb>=0.37.1",
     "pyarrow>=24.0.0",
     "pypdf>=6.14.2",
-    "ruff>=0.15.20",
 ]
 
 [project.scripts]
@@ -18,6 +17,7 @@ organon-indexer = "ai.indexer:main"
 dev = [
     "pre-commit>=4.6.1",
     "pytest>=9.1.1",
+    "ruff>=0.15.20",
 ]
 
 [build-system]
@@ -28,7 +28,7 @@ build-backend = "hatchling.build"
 packages = ["ai"]
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+testpaths = ["tests", "ai/tests"]
 addopts = "-v"
 
 [tool.ruff]
