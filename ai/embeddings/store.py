@@ -2,6 +2,7 @@
 
 import logging
 import os
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -19,23 +20,40 @@ EMBED_DIM = 384
 
 _model = None  # lazy singleton
 _model_name = None
+_model_lock = threading.Lock()
 
 
 def _get_model():
     global _model, _model_name
     model_name = os.environ.get("ORGANON_EMBED_MODEL", DEFAULT_EMBED_MODEL)
     if _model is None or _model_name != model_name:
-        logger.info("loading embedding model: %s", model_name)
-        from fastembed import TextEmbedding
+        with _model_lock:
+            # Re-check inside the lock in case another thread initialized it.
+            if _model is None or _model_name != model_name:
+                logger.info("loading embedding model: %s", model_name)
+                from fastembed import TextEmbedding
 
-        _model = TextEmbedding(model_name=model_name)
-        _model_name = model_name
-        logger.info("embedding model loaded")
+                _model = TextEmbedding(model_name=model_name)
+                _model_name = model_name
+                logger.info("embedding model loaded")
     return _model
 
 
 def _resolve_db_path(db_path: str | None = None) -> str:
     return db_path or os.environ.get("ORGANON_VECTORS_DB", DEFAULT_DB_PATH)
+
+
+def _where_equals(column: str, value: str) -> str:
+    """Build a LanceDB SQL predicate for a string-valued, internal column.
+
+    LanceDB's filter APIs accept SQL-like expressions rather than bind
+    parameters. Keep the column allowlisted and escape string literals in one
+    place so paths and hashes cannot change the predicate structure.
+    """
+    if column not in {"path", "content_hash"}:
+        raise ValueError(f"unsupported filter column: {column}")
+    escaped = value.replace("'", "''")
+    return f"{column} = '{escaped}'"
 
 
 def _get_table(db_path: str | None = None):
@@ -72,32 +90,19 @@ def index_file(path: str, text: str, content_hash: str, db_path: str | None = No
     table = _get_table(db_path)
 
     # Skip if this exact path is already indexed with the same hash. Identical
-    # content in another workspace still gets its own row so scoped searches work.
+    # content in another workspace still gets its own row so scoped search works.
     try:
-        # Use lancedb's Python API rather than constructing SQL-like where clauses
-        # by hand. `table.search().where(...)` accepts SQL fragments, which is
-        # brittle and error-prone when fed arbitrary paths or hashes. Instead,
-        # filter in Python on the small `limit(1)` result where possible.
-        # We still escape single quotes as a defensive fallback for older
-        # lancedb versions, but prefer APIs that avoid injection-like strings.
-        path_escaped = path.replace("'", "''")
-        hash_escaped = content_hash.replace("'", "''")
-
-        # Attempt a narrow search by path first and then confirm the hash.
-        existing = table.search().where(f"path = '{path_escaped}'").limit(1).to_list()
-        if existing and existing[0].get("content_hash") == content_hash:
+        where = f"{_where_equals('path', path)} AND {_where_equals('content_hash', content_hash)}"
+        existing = table.search().where(where).limit(1).to_list()
+        if existing:
             logger.debug("index_file: already indexed [%s]: %s", content_hash[:8], path)
             return
     except Exception as e:
         logger.debug("index_file: hash check failed: %s", e)
 
-    # Remove old entry for this path (hash changed)
+    # Remove old entry for this path (hash changed).
     try:
-        # Prefer table.update/delete with a safe where clause when supported.
-        # lancedb's `delete` accepts a where string; we escape single quotes to
-        # reduce injection risk. If this fails, log and proceed — reindexing is
-        # idempotent.
-        table.delete(f"path = '{path_escaped}'")
+        table.delete(_where_equals("path", path))
         logger.debug("index_file: removed stale entry: %s", path)
     except Exception as e:
         logger.debug("index_file: delete failed (ok if new): %s", e)
@@ -195,10 +200,8 @@ def search_by_path(
     logger.debug("search_by_path: %r limit=%d prefix=%r", path, limit, path_prefix)
     table = _get_table(db_path)
 
-    path_escaped = path.replace("'", "''")
     try:
-        # Narrow by path first using a safe query form, then extract vector.
-        rows = table.search().where(f"path = '{path_escaped}'").limit(1).to_list()
+        rows = table.search().where(_where_equals("path", path)).limit(1).to_list()
     except Exception as e:
         logger.warning("search_by_path: lookup failed for %s: %s", path, e)
         return []
@@ -234,9 +237,7 @@ def update_path_in_store(old_path: str, new_path: str, db_path: str | None = Non
     """
     try:
         table = _get_table(db_path)
-        # Escape single quotes in path strings to avoid injection in the SQL fragment.
-        old_escaped = old_path.replace("'", "''")
-        table.update(where=f"path = '{old_escaped}'", values={"path": new_path})
+        table.update(where=_where_equals("path", old_path), values={"path": new_path})
         logger.debug("update_path_in_store: %s → %s", old_path, new_path)
         return True
     except Exception as e:

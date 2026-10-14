@@ -129,3 +129,25 @@ def test_search_with_nonmatching_prefix_returns_empty(tmp_db):
 
     results = search("graph entity", limit=10, db_path=tmp_db, path_prefix="/nonexistent/dir/")
     assert results == []
+
+
+# ── path/hash escaping ────────────────────────────────────────────────────────
+
+def test_index_file_with_quotes_in_path(tmp_db):
+    """Paths containing single quotes must not break the lancedb where clause."""
+    path = "/tmp/it's a test.rs"
+    index_file(path, "content with quotes", "hash_quotes", db_path=tmp_db)
+
+    results = search("content with quotes", limit=1, db_path=tmp_db)
+    assert len(results) == 1
+    assert results[0]["path"] == path
+
+
+def test_index_file_with_quotes_in_hash(tmp_db):
+    """Hashes containing single quotes must not break the lancedb where clause."""
+    path = "/tmp/normal.rs"
+    index_file(path, "content", "hash'with'quotes", db_path=tmp_db)
+
+    results = search("content", limit=1, db_path=tmp_db)
+    assert len(results) == 1
+    assert results[0]["path"] == path

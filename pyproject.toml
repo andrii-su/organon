@@ -28,7 +28,7 @@ build-backend = "hatchling.build"
 packages = ["ai"]
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+testpaths = ["tests", "ai/tests"]
 addopts = "-v"
 
 [tool.ruff]
