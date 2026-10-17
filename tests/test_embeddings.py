@@ -138,7 +138,9 @@ def test_index_file_with_quotes_in_path(tmp_db):
     path = "/tmp/it's a test.rs"
     index_file(path, "content with quotes", "hash_quotes", db_path=tmp_db)
     index_file(path, "updated content", "hash_quotes_updated", db_path=tmp_db)
-    assert get_indexed_hashes(db_path=tmp_db) == {"hash_quotes_updated"}
+    hashes = get_indexed_hashes(db_path=tmp_db)
+    assert hashes == {"hash_quotes_updated"}
+    assert "hash_quotes" not in hashes
 
     results = search("updated content", limit=10, db_path=tmp_db)
     assert len(results) == 1
