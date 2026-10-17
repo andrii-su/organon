@@ -129,3 +129,36 @@ def test_search_with_nonmatching_prefix_returns_empty(tmp_db):
 
     results = search("graph entity", limit=10, db_path=tmp_db, path_prefix="/nonexistent/dir/")
     assert results == []
+
+
+# ── path/hash escaping ────────────────────────────────────────────────────────
+
+def test_index_file_with_quotes_in_path(tmp_db):
+    """Paths containing single quotes must not break the lancedb where clause."""
+    path = "/tmp/it's a test.rs"
+    index_file(path, "content with quotes", "hash_quotes", db_path=tmp_db)
+    index_file(path, "updated content", "hash_quotes_updated", db_path=tmp_db)
+    hashes = get_indexed_hashes(db_path=tmp_db)
+    assert hashes == {"hash_quotes_updated"}
+    assert "hash_quotes" not in hashes
+
+    results = search("updated content", limit=10, db_path=tmp_db)
+    assert len(results) == 1
+    assert results[0]["path"] == path
+    assert results[0]["text_preview"] == "updated content"
+
+
+def test_index_file_with_quotes_in_hash(tmp_db, monkeypatch):
+    """Quoted hashes must match existing rows without re-embedding."""
+    path = "/tmp/normal.rs"
+    index_file(path, "content", "hash'with'quotes", db_path=tmp_db)
+
+    results = search("content", limit=1, db_path=tmp_db)
+    assert len(results) == 1
+    assert results[0]["path"] == path
+
+    monkeypatch.setattr(
+        "ai.embeddings.store.embed_text",
+        lambda _text: pytest.fail("unchanged quoted hash should skip re-embedding"),
+    )
+    index_file(path, "content", "hash'with'quotes", db_path=tmp_db)
