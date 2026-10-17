@@ -146,11 +146,17 @@ def test_index_file_with_quotes_in_path(tmp_db):
     assert results[0]["text_preview"] == "updated content"
 
 
-def test_index_file_with_quotes_in_hash(tmp_db):
-    """Hashes containing single quotes must not break the lancedb where clause."""
+def test_index_file_with_quotes_in_hash(tmp_db, monkeypatch):
+    """Quoted hashes must match existing rows without re-embedding."""
     path = "/tmp/normal.rs"
     index_file(path, "content", "hash'with'quotes", db_path=tmp_db)
 
     results = search("content", limit=1, db_path=tmp_db)
     assert len(results) == 1
     assert results[0]["path"] == path
+
+    monkeypatch.setattr(
+        "ai.embeddings.store.embed_text",
+        lambda _text: pytest.fail("unchanged quoted hash should skip re-embedding"),
+    )
+    index_file(path, "content", "hash'with'quotes", db_path=tmp_db)
