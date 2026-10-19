@@ -76,4 +76,16 @@ jobs:
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-        run: commitlint --config .commitlintrc.yml --from "$BASE_SHA" --to "$HEAD_SHA" --verbose
+        run: |
+          while IFS= read -r commit; do
+            author_email=$(git show -s --format=%ae "$commit")
+            message=$(git show -s --format=%B "$commit")
+
+            if [[ "$author_email" == "198982749+Copilot@users.noreply.github.com" ]] ||
+              grep -Fq 'Co-authored-by: Copilot Autofix powered by AI <175728472+Copilot@users.noreply.github.com>' <<< "$message"; then
+              echo "Skipping AI-authored commit: $commit"
+              continue
+            fi
+
+            printf '%s\n' "$message" | commitlint --config .commitlintrc.yml --verbose
+          done < <(git rev-list --reverse "$BASE_SHA..$HEAD_SHA")
