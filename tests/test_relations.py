@@ -2,10 +2,8 @@
 import sqlite3
 from pathlib import Path
 
-
 from ai.relations.extract import extract_relations
 from ai.relations.store import get_graph, get_relations, upsert_relations
-
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 

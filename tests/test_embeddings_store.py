@@ -67,8 +67,8 @@ def test_index_file_builds_escaped_predicates(monkeypatch):
     store.index_file(path, "content", content_hash, db_path="unused")
 
     assert table.filters == [
-        f"{store._where_equals('path', path)} AND "
-        f"{store._where_equals('content_hash', content_hash)}"
+        (f"{store._where_equals('path', path)} AND "
+        f"{store._where_equals('content_hash', content_hash)}")
     ]
     assert table.deletes == [store._where_equals("path", path)]
     assert table.added[0]["path"] == path

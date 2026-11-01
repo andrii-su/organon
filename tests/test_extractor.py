@@ -2,8 +2,7 @@
 
 import pytest
 
-from ai.extractor.extract import extract_text, CODE_EXTENSIONS
-
+from ai.extractor.extract import CODE_EXTENSIONS, extract_text
 
 # ── basic extraction ──────────────────────────────────────────────────────────
 
