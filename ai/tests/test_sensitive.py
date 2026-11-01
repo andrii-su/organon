@@ -4,7 +4,6 @@ import pytest
 
 from ai.common.sensitive import is_sensitive, sensitive_reason
 
-
 # ── filename patterns ─────────────────────────────────────────────────────────
 
 

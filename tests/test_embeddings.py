@@ -7,7 +7,7 @@ failing — the embedding path is an optional, network-dependent layer.
 
 import pytest
 
-from ai.embeddings.store import embed_text, index_file, search, get_indexed_hashes, EMBED_DIM
+from ai.embeddings.store import EMBED_DIM, embed_text, get_indexed_hashes, index_file, search
 
 
 def _embeddings_available() -> bool:
