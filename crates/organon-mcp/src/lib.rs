@@ -1263,8 +1263,8 @@ impl OrganonMcpServer {
 
 #[tool_handler]
 impl ServerHandler for OrganonMcpServer {
-    fn get_info(&self) -> ServerInfo {
-        let mut info = ServerInfo::default();
+    fn get_info(&self) -> ServerConfig {
+        let mut info = ServerConfig::default();
         info.instructions = Some(
             "Local semantic filesystem graph. Tools return structured JSON objects. Resources expose entity lists."
                 .into(),
@@ -1281,18 +1281,17 @@ impl ServerHandler for OrganonMcpServer {
         _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> std::result::Result<ListResourcesResult, McpError> {
-        Ok(ListResourcesResult {
-            resources: vec![Resource::new("organon://entities", "entities")],
-            next_cursor: None,
-            meta: None,
-        })
+        Ok(ListResourcesResult::with_all_items(vec![Resource::new(
+            "organon://entities",
+            "entities",
+        )]))
     }
 
     async fn read_resource(
         &self,
         request: ReadResourceRequestParams,
         _context: RequestContext<RoleServer>,
-    ) -> std::result::Result<ReadResourceResult, McpError> {
+    ) -> std::result::Result<ReadResourceResponse, McpError> {
         let text = if request.uri.as_str() == "organon://entities" {
             self.service.entities_resource().map_err(to_mcp_error)?
         } else if let Some(path) = request.uri.as_str().strip_prefix("organon://entity/") {
@@ -1304,10 +1303,10 @@ impl ServerHandler for OrganonMcpServer {
             ));
         };
 
-        Ok(ReadResourceResult::new(vec![ResourceContents::text(
-            text,
-            request.uri.as_str(),
-        )]))
+        Ok(
+            ReadResourceResult::new(vec![ResourceContents::text(text, request.uri.as_str())])
+                .into(),
+        )
     }
 }
 
