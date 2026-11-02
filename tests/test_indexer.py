@@ -4,7 +4,14 @@ from unittest.mock import patch
 
 import pytest
 
-from ai.indexer import get_entities, health_line, reconcile_lancedb_paths, run_once
+from ai.indexer import (
+    get_entities,
+    health_line,
+    prune_fts,
+    prune_vectors,
+    reconcile_lancedb_paths,
+    run_once,
+)
 
 # ── fixtures ──────────────────────────────────────────────────────────────────
 
@@ -231,6 +238,47 @@ def test_run_once_returns_all_stat_keys(tmp_db):
     assert {"total", "indexed", "skipped", "errors", "sensitive_skipped"} == set(stats.keys())
 
 
+def test_prune_vectors_removes_deleted_and_sensitive_entries(tmp_path):
+    entries = [
+        {"path": "/src/live.py", "content_hash": "live"},
+        {"path": "/src/deleted.py", "content_hash": "deleted"},
+        {"path": "/src/.env", "content_hash": "secret"},
+        {"path": "/other/outside.py", "content_hash": "outside"},
+    ]
+    with patch("ai.indexer.delete_path_from_store", return_value=True) as delete:
+        removed = prune_vectors(
+            entries,
+            {"/src/live.py", "/src/.env"},
+            vectors_db_path=str(tmp_path / "vectors"),
+            path_prefixes=["/src"],
+        )
+
+    assert removed == 2
+    assert [call.args[0] for call in delete.call_args_list] == ["/src/deleted.py", "/src/.env"]
+
+
+def test_prune_fts_removes_deleted_and_sensitive_entries(tmp_db):
+    conn = sqlite3.connect(str(tmp_db))
+    conn.execute("CREATE VIRTUAL TABLE entities_fts USING fts5(path UNINDEXED, name, content)")
+    conn.executemany(
+        "INSERT INTO entities_fts(path, name, content) VALUES (?, ?, ?)",
+        [
+            ("/src/main.py", "main.py", "live"),
+            ("/src/deleted.py", "deleted.py", "stale"),
+            ("/src/.env", ".env", "secret"),
+        ],
+    )
+    conn.commit()
+    conn.close()
+
+    assert prune_fts(tmp_db, {"/src/main.py"}, ["/src"]) == 2
+
+    conn = sqlite3.connect(str(tmp_db))
+    paths = conn.execute("SELECT path FROM entities_fts ORDER BY path").fetchall()
+    conn.close()
+    assert paths == [("/src/main.py",)]
+
+
 def test_run_once_updates_fts(tmp_db):
     with (
         patch("ai.indexer.extract_text", return_value="Rust graph and SQLite index"),
@@ -415,7 +463,8 @@ def test_reconcile_is_nonfatal_on_error(tmp_db):
     assert count == 1
 
 
-def test_run_once_empty_db(tmp_path):
+def test_run_once_empty_db(tmp_path, monkeypatch):
+    monkeypatch.setenv("ORGANON_VECTORS_DB", str(tmp_path / "vectors"))
     db = tmp_path / "empty.db"
     conn = sqlite3.connect(str(db))
     conn.execute("""

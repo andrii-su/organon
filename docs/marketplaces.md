@@ -41,8 +41,8 @@ Tag a release to build and attach binaries for macOS (arm64/x64) and Linux
 (x64/arm64):
 
 ```bash
-git tag v1.3.0
-git push origin v1.3.0
+ git tag v1.4.0
+ git push origin v1.4.0
 ```
 
 ### Docker image (GHCR)
@@ -80,13 +80,13 @@ Name: `io.github.andrii-su/organon`. OCI variant (uses the published image):
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.andrii-su/organon",
   "description": "Local-first semantic filesystem layer for AI agents — entity graph, lifecycle, semantic search over MCP.",
-  "version": "1.3.0",
+  "version": "1.4.0",
   "repository": { "url": "https://github.com/andrii-su/organon", "source": "github" },
   "websiteUrl": "https://github.com/andrii-su/organon",
   "packages": [
     {
       "registryType": "oci",
-      "identifier": "ghcr.io/andrii-su/organon:1.3.0",
+      "identifier": "ghcr.io/andrii-su/organon:1.4.0",
       "transport": { "type": "stdio" }
     }
   ]

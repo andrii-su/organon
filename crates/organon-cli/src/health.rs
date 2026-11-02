@@ -16,6 +16,7 @@ pub(crate) struct HealthReport {
     entities: usize,
     relations: usize,
     vectors_exists: bool,
+    vectors_count: Option<usize>,
     freshness: Option<DiffReport>,
     status: String,
     notes: Vec<String>,
@@ -35,6 +36,7 @@ pub(crate) fn cmd_health(
         entities: 0,
         relations: 0,
         vectors_exists,
+        vectors_count: None,
         freshness: None,
         status: "ok".to_string(),
         notes: Vec::new(),
@@ -69,6 +71,23 @@ pub(crate) fn cmd_health(
             ));
         }
         report.freshness = Some(diff);
+
+        if report.vectors_exists {
+            match python::vector_count_with_env(db_path, Some(&canonical_root), &python_env(config))
+            {
+                Ok(count) => {
+                    report.vectors_count = Some(count);
+                    if count < report.entities && report.status == "ok" {
+                        report.status = "warn".to_string();
+                        report.notes.push(format!(
+                            "vector coverage is incomplete: {count}/{} entities",
+                            report.entities
+                        ));
+                    }
+                }
+                Err(e) => report.notes.push(format!("vector stats unavailable: {e}")),
+            }
+        }
     }
 
     if !report.vectors_exists {
@@ -89,6 +108,9 @@ pub(crate) fn cmd_health(
     println!("  db:       {}", report.db_path);
     println!("  entities: {}", report.entities);
     println!("  relations: {}", report.relations);
+    if let Some(count) = report.vectors_count {
+        println!("  vectors:   {count}");
+    }
     println!(
         "  vectors:  {}",
         if report.vectors_exists {
