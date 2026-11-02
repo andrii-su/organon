@@ -1,9 +1,11 @@
 """Tests for ai/indexer.py — run_once logic."""
 import sqlite3
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
+from ai.embeddings.store import EMBED_DIM, _get_table, get_all_entries
 from ai.indexer import (
     get_entities,
     health_line,
@@ -277,6 +279,99 @@ def test_prune_fts_removes_deleted_and_sensitive_entries(tmp_db):
     paths = conn.execute("SELECT path FROM entities_fts ORDER BY path").fetchall()
     conn.close()
     assert paths == [("/src/main.py",)]
+
+
+def _seed_vectors(path, rows):
+    table = _get_table(str(path))
+    table.add(
+        [
+            {
+                "path": row_path,
+                "content_hash": content_hash,
+                "text_preview": "fixture",
+                "vector": [0.0] * EMBED_DIM,
+                "indexed_at": 0,
+            }
+            for row_path, content_hash in rows
+        ]
+    )
+
+
+def _seed_fts(db, rows):
+    conn = sqlite3.connect(str(db))
+    conn.execute("CREATE VIRTUAL TABLE IF NOT EXISTS entities_fts USING fts5(path UNINDEXED, name, content)")
+    conn.executemany(
+        "INSERT INTO entities_fts(path, name, content) VALUES (?, ?, ?)",
+        [(path, Path(path).name, "fixture") for path in rows],
+    )
+    conn.commit()
+    conn.close()
+
+
+def test_run_once_prunes_stale_sensitive_and_scoped_vectors(tmp_db, tmp_path):
+    conn = sqlite3.connect(str(tmp_db))
+    conn.execute(
+        "INSERT INTO entities VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        ("5", "/src/.env", ".env", "", 10, 0, 0, 0, "active", "hash_env", None),
+    )
+    conn.execute(
+        "INSERT INTO entities VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        ("6", "/other/outside.py", "outside.py", ".py", 10, 0, 0, 0, "active", "hash_outside", None),
+    )
+    conn.commit()
+    conn.close()
+
+    vectors = tmp_path / "vectors"
+    _seed_vectors(
+        vectors,
+        [
+            ("/src/main.py", "hash_main"),
+            ("/src/dead.py", "hash_dead"),
+            ("/src/.env", "hash_env"),
+            ("/other/outside.py", "hash_outside"),
+        ],
+    )
+    _seed_fts(tmp_db, ["/src/main.py", "/src/dead.py", "/src/.env"])
+
+    with (
+        patch("ai.indexer.extract_text", return_value="content"),
+        patch("ai.indexer.index_file"),
+        patch("ai.indexer.extract_relations", return_value=[]),
+        patch("ai.indexer.upsert_relations"),
+    ):
+        run_once(tmp_db, vectors_db_path=str(vectors), path_prefixes=["/src"])
+
+    vector_paths = {entry["path"] for entry in get_all_entries(db_path=str(vectors))}
+    assert vector_paths == {"/src/main.py", "/other/outside.py"}
+
+    conn = sqlite3.connect(str(tmp_db))
+    fts_paths = {row[0] for row in conn.execute("SELECT path FROM entities_fts")}
+    conn.close()
+    assert fts_paths == {"/src/main.py", "/src/utils.py"}
+
+
+def test_run_once_reconciles_renamed_vector_integration(tmp_db, tmp_path):
+    conn = sqlite3.connect(str(tmp_db))
+    conn.execute(
+        "UPDATE entities SET path = ?, name = ? WHERE path = ?",
+        ("/src/renamed.py", "renamed.py", "/src/main.py"),
+    )
+    conn.commit()
+    conn.close()
+
+    vectors = tmp_path / "vectors"
+    _seed_vectors(vectors, [("/src/main.py", "hash_main")])
+
+    with (
+        patch("ai.indexer.extract_text", return_value="content"),
+        patch("ai.indexer.index_file"),
+        patch("ai.indexer.extract_relations", return_value=[]),
+        patch("ai.indexer.upsert_relations"),
+    ):
+        run_once(tmp_db, vectors_db_path=str(vectors), path_prefixes=["/src"])
+
+    vector_paths = {entry["path"] for entry in get_all_entries(db_path=str(vectors))}
+    assert vector_paths == {"/src/renamed.py"}
 
 
 def test_run_once_updates_fts(tmp_db):
