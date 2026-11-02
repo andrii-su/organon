@@ -22,6 +22,7 @@ from pathlib import Path
 from ai.common.ignore import is_ignored
 from ai.common.sensitive import is_sensitive, sensitive_reason
 from ai.embeddings.store import (
+    delete_path_from_store,
     get_all_entries,
     index_file,
     update_path_in_store,
@@ -117,6 +118,45 @@ def update_fts(db_path: Path, path: str, name: str, text: str) -> None:
         )
 
 
+def prune_fts(db_path: Path, active_paths: set[str], path_prefixes: list[str] | None = None) -> int:
+    """Remove FTS rows that no longer belong to an active graph entity."""
+    prefixes = _normalize_prefixes(path_prefixes)
+    with closing(sqlite3.connect(str(db_path))) as conn, conn:
+        conn.execute(
+            "CREATE VIRTUAL TABLE IF NOT EXISTS entities_fts USING fts5("
+            "path UNINDEXED, name, content)"
+        )
+        rows = conn.execute("SELECT path FROM entities_fts").fetchall()
+        removed = 0
+        for (path,) in rows:
+            if prefixes and not _path_in_scope(path, prefixes):
+                continue
+            if path not in active_paths or is_sensitive(path):
+                conn.execute("DELETE FROM entities_fts WHERE path = ?", (path,))
+                removed += 1
+        return removed
+
+
+def prune_vectors(
+    entries: list[dict],
+    active_paths: set[str],
+    vectors_db_path: str | None = None,
+    path_prefixes: list[str] | None = None,
+) -> int:
+    """Remove vector rows for deleted/dead/sensitive files in the current scope."""
+    prefixes = _normalize_prefixes(path_prefixes)
+    removed = 0
+    for entry in entries:
+        path = entry["path"]
+        if prefixes and not _path_in_scope(path, prefixes):
+            continue
+        if path in active_paths and not is_sensitive(path):
+            continue
+        if delete_path_from_store(path, db_path=vectors_db_path):
+            removed += 1
+    return removed
+
+
 def reconcile_lancedb_paths(
     db_path: Path,
     vectors_db_path: str | None = None,
@@ -187,6 +227,17 @@ def run_once(
         logger.warning("path reconciliation failed (non-fatal): %s", e)
 
     entities = get_entities(db_path, prefixes)
+    active_paths = {e["path"] for e in entities}
+    vector_entries = get_all_entries(db_path=vectors_db_path)
+    pruned_vectors = prune_vectors(
+        vector_entries,
+        active_paths,
+        vectors_db_path=vectors_db_path,
+        path_prefixes=prefixes,
+    )
+    pruned_fts = prune_fts(db_path, active_paths, prefixes)
+    if pruned_vectors or pruned_fts:
+        logger.info("pruned %d vector row(s) and %d FTS row(s)", pruned_vectors, pruned_fts)
     if not entities:
         logger.info("no entities in graph")
         return {"total": 0, "indexed": 0, "skipped": 0, "errors": 0, "sensitive_skipped": 0}
@@ -195,9 +246,7 @@ def run_once(
     # Track (path, content_hash) pairs, not bare hashes: index_file stores one
     # row per path, so identical content at two paths must each be embedded.
     # Keying on hash alone would skip the second path and break scoped search.
-    indexed_pairs = {
-        (e["path"], e["content_hash"]) for e in get_all_entries(db_path=vectors_db_path)
-    }
+    indexed_pairs = {(e["path"], e["content_hash"]) for e in vector_entries}
     fts_paths = get_fts_paths(db_path, prefixes)
     stats = {
         "total": len(entities),
@@ -300,6 +349,9 @@ def main() -> None:
         "--watch", type=int, metavar="SECONDS", help="Run continuously every N seconds"
     )
     parser.add_argument(
+        "--stats", action="store_true", help="Print vector count for the selected scope"
+    )
+    parser.add_argument(
         "--path-prefix",
         action="append",
         dest="path_prefixes",
@@ -314,6 +366,13 @@ def main() -> None:
     db_path = Path(args.db).expanduser()
     if not db_path.exists():
         logger.error("DB not found: %s (run organon-core first)", db_path)
+        return
+
+    if args.stats:
+        prefixes = _normalize_prefixes(args.path_prefixes)
+        entries = get_all_entries()
+        count = sum(1 for e in entries if not prefixes or _path_in_scope(e["path"], prefixes))
+        print(count)
         return
 
     if args.watch:

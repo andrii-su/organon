@@ -103,6 +103,27 @@ pub fn indexer_health_with_env(envs: &[(String, String)]) -> Result<String> {
     python_run_with_env(&["-m", INDEXER_MODULE, "--health"], envs)
 }
 
+pub fn vector_count_with_env(
+    db_path: &Path,
+    path_prefix: Option<&Path>,
+    envs: &[(String, String)],
+) -> Result<usize> {
+    let mut args = vec![
+        "-m".to_string(),
+        INDEXER_MODULE.to_string(),
+        "--stats".to_string(),
+        "--db".to_string(),
+        db_path.to_string_lossy().to_string(),
+    ];
+    if let Some(prefix) = path_prefix {
+        args.push("--path-prefix".to_string());
+        args.push(prefix.to_string_lossy().to_string());
+    }
+    let refs: Vec<_> = args.iter().map(String::as_str).collect();
+    let output = python_run_with_env(&refs, envs)?;
+    Ok(output.parse()?)
+}
+
 pub fn spawn_indexer_with_env(
     db_path: &Path,
     watch: Option<u64>,

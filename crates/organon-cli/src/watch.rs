@@ -123,7 +123,7 @@ pub(crate) fn cmd_watch(
     let _refresh_handle =
         scanner::schedule_lifecycle_refresh(Arc::clone(&graph), 6, config.lifecycle.clone());
 
-    let _indexer_child = if !no_index {
+    let mut indexer_child = if !no_index {
         let envs = python_env(config);
         match python::spawn_indexer_with_env(db_path, Some(index_interval), &roots, &envs) {
             Ok(child) => {
@@ -148,7 +148,15 @@ pub(crate) fn cmd_watch(
         None
     };
 
-    organon_core::watcher::watch_many(&watch_roots, graph, config.watch.use_git_timestamps)
+    let result =
+        organon_core::watcher::watch_many(&watch_roots, graph, config.watch.use_git_timestamps);
+    if let Some(mut child) = indexer_child.take() {
+        // A normal watcher shutdown must not leave a detached Python indexer
+        // running against a database that is no longer being refreshed.
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+    result
 }
 
 /// Dispatch daemon subcommands.

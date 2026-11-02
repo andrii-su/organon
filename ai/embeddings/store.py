@@ -243,3 +243,20 @@ def update_path_in_store(old_path: str, new_path: str, db_path: str | None = Non
     except Exception as e:
         logger.warning("update_path_in_store failed %s → %s: %s", old_path, new_path, e)
         return False
+
+
+def delete_path_from_store(path: str, db_path: str | None = None) -> bool:
+    """Remove every vector row for ``path``.
+
+    Deletions are deliberately idempotent so the indexer can safely prune rows
+    for files that were removed, archived, or became sensitive since the last
+    indexing run.
+    """
+    try:
+        table = _get_table(db_path)
+        table.delete(_where_equals("path", path))
+        logger.debug("delete_path_from_store: %s", path)
+        return True
+    except Exception as e:
+        logger.warning("delete_path_from_store failed for %s: %s", path, e)
+        return False
