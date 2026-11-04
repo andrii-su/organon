@@ -448,7 +448,10 @@ fn process_alive(_pid: u32) -> bool {
 
 #[cfg(unix)]
 fn terminate_process(pid: u32) -> Result<()> {
-    let rc = unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
+    // `spawn_watch_daemon` calls `setsid`, so the daemon PID is also the
+    // process-group ID. Terminate the whole group to avoid orphaning the
+    // Python indexer spawned by the watcher.
+    let rc = unsafe { libc::kill(-(pid as libc::pid_t), libc::SIGTERM) };
     if rc == 0 {
         Ok(())
     } else {
