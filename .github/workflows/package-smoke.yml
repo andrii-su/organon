@@ -144,8 +144,9 @@ jobs:
           else
             sha256sum "$dist.tar.gz" > "$dist.tar.gz.sha256"
           fi
-          tar -tzf "$dist.tar.gz" | grep -q "^${dist}/organon$"
-          tar -tzf "$dist.tar.gz" | grep -q "^${dist}/README.md$"
+          tar -tzf "$dist.tar.gz" > "$RUNNER_TEMP/archive-contents.txt"
+          grep -Fxq "$dist/organon" "$RUNNER_TEMP/archive-contents.txt"
+          grep -Fxq "$dist/README.md" "$RUNNER_TEMP/archive-contents.txt"
           test -s "$dist.tar.gz.sha256"
 
       - name: Smoke native binary
