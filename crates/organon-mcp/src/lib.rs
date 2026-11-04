@@ -30,6 +30,10 @@ use rmcp::{
 };
 use serde::{Deserialize, Serialize};
 
+const MAX_MCP_RESULTS: usize = 100;
+const MAX_MCP_CONTEXT_BUDGET: usize = 100_000;
+const MAX_MCP_GRAPH_DEPTH: u8 = 5;
+
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum SearchMode {
@@ -379,6 +383,7 @@ impl McpService {
     }
 
     pub fn list_by_lifecycle(&self, state: &str, limit: usize) -> Result<Vec<LifecycleRow>> {
+        let limit = limit.min(MAX_MCP_RESULTS);
         let valid = ["born", "active", "dormant", "archived", "dead"];
         if !valid.contains(&state) {
             bail!("invalid state '{state}'");
@@ -436,6 +441,7 @@ impl McpService {
     }
 
     pub fn get_history(&self, path: &str, limit: usize) -> Result<HistoryResponse> {
+        let limit = limit.min(MAX_MCP_RESULTS);
         let path = normalize_request_path(path);
         self.ensure_in_scope(&path)?;
         let entries = self.open_graph()?.get_history(&path, limit)?;
@@ -452,6 +458,7 @@ impl McpService {
     }
 
     pub fn get_impact(&self, path: &str, depth: u8) -> Result<ImpactResponse> {
+        let depth = depth.min(MAX_MCP_GRAPH_DEPTH);
         let path = normalize_request_path(path);
         self.ensure_in_scope(&path)?;
         let entries: Vec<_> = self
@@ -523,7 +530,12 @@ impl McpService {
             .ok_or_else(|| anyhow::anyhow!("no saved query named '{name}'"))?;
 
         let kind = sq["kind"].as_str().unwrap_or("find");
-        let limit = sq.get("limit").and_then(|v| v.as_u64()).unwrap_or(20) as usize;
+        let limit = sq
+            .get("limit")
+            .and_then(|v| v.as_u64())
+            .and_then(|value| usize::try_from(value).ok())
+            .unwrap_or(20)
+            .min(MAX_MCP_RESULTS);
 
         match kind {
             "find" => {
@@ -601,6 +613,7 @@ impl McpService {
         limit: usize,
         path_prefix: Option<&str>,
     ) -> Result<Vec<SearchHit>> {
+        let limit = limit.min(MAX_MCP_RESULTS);
         let path = normalize_request_path(path);
         self.ensure_in_scope(&path)?;
         let path_prefix = self.effective_prefix(path_prefix)?;
@@ -677,6 +690,7 @@ impl McpService {
         metadata_filter: &FindFilter,
         explain: bool,
     ) -> Result<Vec<SearchHit>> {
+        let limit = limit.min(MAX_MCP_RESULTS);
         let path_prefix = self.effective_prefix(path_prefix)?;
         let mut merged: BTreeMap<String, MergeEntry> = BTreeMap::new();
         let candidate_limit = if metadata_filter_requested(metadata_filter) {
@@ -794,6 +808,8 @@ impl McpService {
             mode,
             metadata_filter,
         } = params;
+        let budget_chars = budget_chars.min(MAX_MCP_CONTEXT_BUDGET);
+        let limit = limit.min(MAX_MCP_RESULTS);
         if query.is_none() && seed_path.is_none() {
             bail!("provide query or path");
         }
@@ -1761,6 +1777,32 @@ mod tests {
         assert!(ensure_loopback_host("0.0.0.0").is_err());
         assert!(ensure_loopback_host("192.168.1.10").is_err());
         assert!(ensure_loopback_host("localhost").is_err());
+    }
+
+    #[test]
+    fn mcp_resource_limits_are_bounded() {
+        assert_eq!(MAX_MCP_RESULTS, 100);
+        assert_eq!(MAX_MCP_CONTEXT_BUDGET, 100_000);
+        assert_eq!(MAX_MCP_GRAPH_DEPTH, 5);
+
+        let (svc, graph, _file) = temp_service();
+        graph.upsert(&test_entity("/tmp/main.rs")).unwrap();
+
+        let impact = svc.get_impact("/tmp/main.rs", u8::MAX).unwrap();
+        assert_eq!(impact.depth, MAX_MCP_GRAPH_DEPTH);
+
+        let context = svc
+            .build_context(BuildContextParams {
+                query: None,
+                seed_path: Some("/tmp/main.rs"),
+                path_prefix: None,
+                budget_chars: usize::MAX,
+                limit: usize::MAX,
+                mode: SearchMode::Fts,
+                metadata_filter: &FindFilter::default(),
+            })
+            .unwrap();
+        assert_eq!(context.budget_chars, MAX_MCP_CONTEXT_BUDGET);
     }
 
     #[tokio::test]

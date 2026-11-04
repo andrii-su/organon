@@ -23,7 +23,7 @@ jobs:
         env:
           BRANCH_NAME: ${{ github.head_ref }}
         run: |
-          pattern='^((feat|fix|chore|docs|refactor|test|ci|build|style|perf|revert)\/[a-z0-9][a-z0-9._/-]*|(dependabot|renovate)\/.+)$'
+          pattern='^((feat|fix|harden|chore|docs|refactor|test|ci|build|style|perf|revert)\/[a-z0-9][a-z0-9._/-]*|(dependabot|renovate)\/.+)$'
           if [[ "$BRANCH_NAME" =~ $pattern ]]; then
             echo "Branch name OK: $BRANCH_NAME"
             exit 0
