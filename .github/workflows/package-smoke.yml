@@ -73,18 +73,15 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Run setup.sh with isolated HOME
+      - name: Run setup.sh
         env:
-          HOME: ${{ runner.temp }}/organon-home
           SHELL: /bin/bash
         run: |
-          mkdir -p "$HOME"
           bash setup.sh
 
       - name: Verify installed command from outside repository
         working-directory: ${{ runner.temp }}
         env:
-          HOME: ${{ runner.temp }}/organon-home
           ORGANON_HOME: ${{ runner.temp }}/setup-data
           ORGANON_PYTHON_PROJECT: ${{ github.workspace }}
         run: |
