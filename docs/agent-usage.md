@@ -32,6 +32,10 @@ organon mcp
 organon mcp --sse
 ```
 
+The HTTP transport is intentionally loopback-only because it has no built-in
+authentication. It listens on `127.0.0.1` by default and refuses non-loopback
+hosts; use stdio for local clients or add an authenticated gateway separately.
+
 ### Scope to a specific directory
 
 ```bash

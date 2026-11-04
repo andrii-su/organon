@@ -1317,6 +1317,7 @@ pub async fn serve_stdio(service: McpService) -> Result<()> {
 }
 
 pub async fn serve_streamable_http(service: McpService, host: String, port: u16) -> Result<()> {
+    ensure_loopback_host(&host)?;
     let addr = format!("{host}:{port}");
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     let transport = StreamableHttpService::new(
@@ -1328,6 +1329,20 @@ pub async fn serve_streamable_http(service: McpService, host: String, port: u16)
     debug!("mcp streamable http: http://{addr}/mcp");
     axum::serve(listener, router).await?;
     Ok(())
+}
+
+/// Keep the unauthenticated HTTP transport on loopback.
+///
+/// The streamable HTTP endpoint exposes filesystem data through MCP tools and
+/// does not provide an authentication layer. A non-loopback bind would turn a
+/// local-only service into a network-accessible one, so fail closed until an
+/// authenticated transport is available.
+fn ensure_loopback_host(host: &str) -> Result<()> {
+    let ip = host.trim_matches(['[', ']'].as_ref());
+    match ip.parse::<std::net::IpAddr>() {
+        Ok(address) if address.is_loopback() => Ok(()),
+        _ => bail!("MCP HTTP server only supports loopback hosts without authentication: {host}"),
+    }
 }
 
 pub async fn serve_stdio_from_config(config: OrgConfig) -> Result<()> {
@@ -1732,6 +1747,20 @@ mod tests {
         let server = OrganonMcpServer::new(McpService::default());
         let info = server.get_info();
         assert!(info.capabilities.resources.is_some());
+    }
+
+    #[test]
+    fn http_server_accepts_loopback_hosts() {
+        assert!(ensure_loopback_host("127.0.0.1").is_ok());
+        assert!(ensure_loopback_host("::1").is_ok());
+        assert!(ensure_loopback_host("[::1]").is_ok());
+    }
+
+    #[test]
+    fn http_server_rejects_non_loopback_hosts() {
+        assert!(ensure_loopback_host("0.0.0.0").is_err());
+        assert!(ensure_loopback_host("192.168.1.10").is_err());
+        assert!(ensure_loopback_host("localhost").is_err());
     }
 
     #[tokio::test]
