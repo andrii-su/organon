@@ -1,0 +1,161 @@
+name: Package smoke
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: package-smoke-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  docker-mcp:
+    name: Docker build and MCP startup
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Build Docker image
+        run: docker build --pull -t organon:package-smoke .
+
+      - name: Start MCP over stdio
+        run: |
+          docker run --rm -i organon:package-smoke mcp --global > "$RUNNER_TEMP/mcp-response.jsonl" <<'EOF'
+          {"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"package-smoke","version":"1"}}}
+          {"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}
+          EOF
+          grep -q '"id":1' "$RUNNER_TEMP/mcp-response.jsonl"
+          grep -q '"serverInfo"' "$RUNNER_TEMP/mcp-response.jsonl"
+          grep -q '"id":2' "$RUNNER_TEMP/mcp-response.jsonl"
+
+  installed-binary:
+    name: Installed binary outside repository
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Python environment
+        uses: astral-sh/setup-uv@v7
+        with:
+          python-version: "3.11"
+
+      - run: uv sync --locked --group dev
+
+      - name: Build and install binary
+        run: |
+          cargo build --release --locked --bin organon
+          install -D target/release/organon "$RUNNER_TEMP/organon-install/bin/organon"
+
+      - name: Run installed binary outside repository root
+        working-directory: ${{ runner.temp }}
+        env:
+          ORGANON_HOME: ${{ runner.temp }}/organon-data
+          ORGANON_PYTHON_PROJECT: ${{ github.workspace }}
+        run: |
+          "$RUNNER_TEMP/organon-install/bin/organon" --version
+          "$RUNNER_TEMP/organon-install/bin/organon" doctor | tee "$RUNNER_TEMP/doctor.log"
+          grep -q '\[OK\].*python' "$RUNNER_TEMP/doctor.log"
+
+  setup-script:
+    name: setup.sh installation smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          python-version: "3.11"
+
+      - name: Run setup.sh
+        env:
+          SHELL: /bin/bash
+        run: |
+          bash setup.sh
+
+      - name: Verify installed command from outside repository
+        working-directory: ${{ runner.temp }}
+        env:
+          ORGANON_HOME: ${{ runner.temp }}/setup-data
+          ORGANON_PYTHON_PROJECT: ${{ github.workspace }}
+        run: |
+          export PATH="$HOME/.local/bin:$PATH"
+          organon --version
+          organon doctor | tee "$RUNNER_TEMP/setup-doctor.log"
+          grep -q '\[OK\].*python' "$RUNNER_TEMP/setup-doctor.log"
+
+  release-artifacts:
+    name: Release artifact (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            target: aarch64-apple-darwin
+          - os: macos-latest
+            target: x86_64-apple-darwin
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install ARM Linux linker
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+          mkdir -p .cargo
+          cat >> .cargo/config.toml <<'EOF'
+          [target.aarch64-unknown-linux-gnu]
+          linker = "aarch64-linux-gnu-gcc"
+          EOF
+
+      - name: Build release binary
+        run: cargo build --release --locked --target "${{ matrix.target }}" --bin organon
+
+      - name: Package and validate artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          bin="target/${{ matrix.target }}/release/organon"
+          dist="organon-${{ matrix.target }}"
+          test -x "$bin"
+          mkdir -p "$dist"
+          cp "$bin" "$dist/"
+          cp README.md LICENSE "$dist/"
+          tar -czf "$dist.tar.gz" "$dist"
+          if command -v shasum >/dev/null 2>&1; then
+            shasum -a 256 "$dist.tar.gz" > "$dist.tar.gz.sha256"
+          else
+            sha256sum "$dist.tar.gz" > "$dist.tar.gz.sha256"
+          fi
+          tar -tzf "$dist.tar.gz" | grep -q "^${dist}/organon$"
+          tar -tzf "$dist.tar.gz" | grep -q "^${dist}/README.md$"
+          test -s "$dist.tar.gz.sha256"
+
+      - name: Smoke native binary
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        run: target/${{ matrix.target }}/release/organon --version
+
+      - name: Upload validated artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: organon-${{ matrix.target }}-smoke
+          path: |
+            organon-${{ matrix.target }}.tar.gz
+            organon-${{ matrix.target }}.tar.gz.sha256
