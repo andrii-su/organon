@@ -160,7 +160,7 @@ organon related-tests src/auth.rs
 ```bash
 # Serve the graph to an agent over MCP
 organon mcp             # stdio (Claude Desktop, Cursor, ...)
-organon mcp --sse       # HTTP / SSE
+organon mcp --sse       # HTTP / SSE (loopback-only)
 organon mcp --scope ./src   # limit a session to a subtree
 ```
 
