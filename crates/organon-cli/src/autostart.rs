@@ -9,6 +9,7 @@ use organon_core::config::OrgConfig;
 
 use crate::cli_types::AutostartCmd;
 
+#[cfg(target_os = "macos")]
 const LABEL: &str = "dev.organon.watch";
 
 pub(crate) fn cmd_autostart(action: AutostartCmd, config: &OrgConfig, db: &Path) -> Result<()> {
