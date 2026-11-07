@@ -109,6 +109,19 @@ def test_run_once_indexes_new_files(tmp_db, tmp_path):
     assert mock_index.call_count == 2
 
 
+def test_run_once_refreshes_route_index_even_without_vector_changes(tmp_db):
+    with (
+        patch("ai.indexer.get_all_entries", return_value=[]),
+        patch("ai.indexer.extract_text", return_value=None),
+        patch("ai.indexer.discover_routes", return_value=[]) as discover,
+        patch("ai.indexer.replace_route_index") as replace,
+    ):
+        run_once(tmp_db, path_prefixes=["/src"])
+
+    discover.assert_called_once()
+    replace.assert_called_once_with(tmp_db, [], ["/src"])
+
+
 def test_run_once_skips_already_indexed(tmp_db):
     with (
         patch("ai.indexer.extract_text", return_value="content"),

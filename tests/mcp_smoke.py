@@ -65,6 +65,7 @@ def _run_stdio(binary: Path, db: Path, workspace: Path) -> dict:
         {"jsonrpc": "2.0", "id": 6, "method": "tools/call", "params": {"name": "get_file_content", "arguments": {"path": file_path}}},
         {"jsonrpc": "2.0", "id": 7, "method": "resources/read", "params": {"uri": "organon://entities"}},
         {"jsonrpc": "2.0", "id": 8, "method": "tools/call", "params": {"name": "get_entity", "arguments": {"path": outside_path}}},
+        {"jsonrpc": "2.0", "id": 9, "method": "tools/call", "params": {"name": "get_history", "arguments": {"path": file_path}}},
     ]
     proc = subprocess.run(
         [str(binary), "--db", str(db), "mcp", "--scope", str(workspace)],
@@ -84,6 +85,11 @@ def _run_stdio(binary: Path, db: Path, workspace: Path) -> dict:
     assert responses[6]["result"]["structuredContent"]["content"].startswith("print")
     assert file_path in responses[7]["result"]["contents"][0]["text"]
     assert "error" in responses[8] or responses[8]["result"].get("isError") is True
+    history = responses[9]["result"]["structuredContent"]["entries"]
+    modified = next(entry for entry in history if entry["event"] == "modified")
+    assert modified["text_change"]["before"] == 'print("hello")\n'
+    assert modified["text_change"]["after"] == 'print("updated")\n'
+    assert modified["observation_gap"] is True
     return responses
 
 
@@ -142,6 +148,8 @@ def main() -> int:
         (workspace / "README.md").write_text("MCP smoke fixture\n", encoding="utf-8")
         (root / "outside.py").write_text("outside\n", encoding="utf-8")
         db = root / "entities.db"
+        _build_graph(binary, workspace, db)
+        (workspace / "main.py").write_text('print("updated")\n', encoding="utf-8")
         _build_graph(binary, workspace, db)
         _run_stdio(binary, db, workspace)
         _run_http(binary, db, workspace)

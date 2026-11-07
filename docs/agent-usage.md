@@ -79,7 +79,7 @@ Add this to your Claude Desktop `mcpServers` config:
 | `get_file_content` | Read file content from the graph store |
 | `build_context` | Assemble a compact context pack for a task description |
 | `find_duplicates` | Identify exact duplicate groups |
-| `get_history` | File and entity change history |
+| `get_history` | File and entity events, text before/after regions when available, and gaps detected after downtime |
 | `get_impact` | Reverse-dependency impact for a file |
 | `list_saved_queries` | List persisted named queries |
 | `run_saved_query` | Execute a named query |
@@ -117,6 +117,21 @@ organon cleanup --dry-run
 
 `organon context` produces the same shape as the `build_context` MCP tool and
 is useful for inspecting what the agent receives.
+
+`get_history` groups edits observed within five seconds into one event. For
+readable files up to 256 KiB it includes the changed text region with `before`,
+`after`, and `start_line`. Binary, oversized, unreadable, and secret-named files
+keep metadata-only events. `observation_gap` means a change was first found by
+the startup scan; intermediate edits during downtime cannot be reconstructed.
+For older events, call `get_history` with `include_archive=true`; entries from
+the local archive include `archived: true`. Tell the user when archival data
+was used. `organon history <file> --archive` offers the same view in the CLI.
+
+For continuous background updates, configure absolute paths in `[watch].roots`
+and run `organon daemon autostart install`. This registers a per-user service
+on macOS or Linux. The watcher rescans after login or restart. History older
+than `[history].archive_after_days` (default 90) moves into a cold table in
+the same SQLite file, and `organon stats` reports active and archive sizes.
 
 ## Scoping
 

@@ -14,3 +14,4 @@ logs/
 *.log
 .claude/
 .omc/
+docs/superpowers/

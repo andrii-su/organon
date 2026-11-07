@@ -4,6 +4,7 @@
 //! to the command modules. All subcommand arg types live in `cli_types`.
 
 mod agent;
+mod autostart;
 mod cli_types;
 mod context;
 mod export;
@@ -84,7 +85,10 @@ fn main() -> Result<()> {
             detect_renames,
             daemon,
         ),
-        Cmd::Daemon { action } => watch::cmd_daemon(action),
+        Cmd::Daemon { action } => match action {
+            DaemonCmd::Autostart { action } => autostart::cmd_autostart(action, &config, &db_path),
+            action => watch::cmd_daemon(action),
+        },
         Cmd::Status { path } => inspect::cmd_status(path, &db_path),
         Cmd::Ls { state, limit } => inspect::cmd_ls(state.as_deref(), limit, &db_path),
         Cmd::Find {
@@ -120,7 +124,7 @@ fn main() -> Result<()> {
         ),
         Cmd::Completions { shell } => inspect::cmd_completions(shell),
         Cmd::Init { force } => inspect::cmd_init(force),
-        Cmd::Stats => inspect::cmd_stats(&db_path),
+        Cmd::Stats => inspect::cmd_stats(&db_path, &config),
         Cmd::Search {
             query,
             like,
@@ -195,7 +199,12 @@ fn main() -> Result<()> {
             depth,
             format,
         } => graph_cmds::cmd_graph(&path, depth, format, &db_path),
-        Cmd::History { path, limit, json } => graph_cmds::cmd_history(&path, limit, json, &db_path),
+        Cmd::History {
+            path,
+            limit,
+            json,
+            archive,
+        } => graph_cmds::cmd_history(&path, limit, json, archive, &db_path),
         Cmd::Impact { path, depth, json } => graph_cmds::cmd_impact(&path, depth, json, &db_path),
         Cmd::Duplicates { json } => graph_cmds::cmd_duplicates(json, &db_path),
         Cmd::Health { path, json } => health::cmd_health(path.as_deref(), json, &db_path, &config),
@@ -544,6 +553,15 @@ mod tests {
 
     #[test]
     fn daemon_commands_parse() {
+        let autostart = Cli::try_parse_from(["organon", "daemon", "autostart", "install"]).unwrap();
+        assert!(matches!(
+            autostart.command,
+            Cmd::Daemon {
+                action: DaemonCmd::Autostart {
+                    action: cli_types::AutostartCmd::Install
+                }
+            }
+        ));
         let list = Cli::try_parse_from(["organon", "daemon", "list"]).unwrap();
         assert!(matches!(
             list.command,

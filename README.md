@@ -256,6 +256,8 @@ tracked in [docs/marketplaces.md](./docs/marketplaces.md).
 organon watch .                          # watch + auto-index (foreground)
 organon watch /path --daemon             # detached background watcher
 organon daemon list | status | logs <id> | stop <id>
+organon daemon autostart install           # enable user service (configured roots)
+organon daemon autostart uninstall         # disable user service
 organon index [path] [--watch <secs>]    # Python indexer (vectors + relations)
 
 # ── Inspect ───────────────────────────────────────────────────
@@ -275,6 +277,7 @@ organon related-tests src/auth.rs
 organon graph src/main.rs --depth 2 --format mermaid
 organon impact src/auth.rs --depth 3
 organon history src/auth.rs --limit 20
+organon history src/auth.rs --archive      # include older archived events
 organon duplicates
 
 # ── Maintenance ───────────────────────────────────────────────
@@ -330,6 +333,30 @@ Config lives at `~/.organon/config.toml` (write defaults with `organon init`). K
 | `ORGANON_UV` | Path to `uv` for non-standard installs |
 
 Defaults: `dormant_days=30`, `archive_days=90`, embed model `BAAI/bge-small-en-v1.5`, hybrid score `0.3 * fts + 0.7 * vector`.
+
+To keep the watcher running across logins, set absolute directories in
+`[watch].roots` and run `organon daemon autostart install`. This installs a
+per-user launchd service on macOS or systemd user service on Linux. The watcher
+rescans these roots after each start and marks any downtime change as an
+observation gap. `organon daemon autostart uninstall` removes the service.
+Install from a stable binary path; the service records the current executable
+path when installed.
+
+```toml
+[watch]
+roots = ["/absolute/path/to/project"]
+
+[history]
+archive_after_days = 90
+warn_at_mb = 100
+```
+
+`[history].archive_after_days` defaults to 90; the running watcher moves older
+events to a cold table in the same local SQLite database. `get_history` only
+reads active history unless `include_archive=true`; archived entries carry
+`archived: true`. `[history].warn_at_mb` defaults to 100 and warns separately
+for active and archived payload estimates. `organon stats` shows both sizes.
+Archiving is a logical separation and does not shrink the database file.
 
 ## Development
 

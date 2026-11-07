@@ -43,7 +43,7 @@ pub(crate) enum Cmd {
 
     /// Manage background watch daemons
     #[command(
-        after_long_help = "Examples:\n  organon daemon list\n  organon daemon status\n  organon daemon logs <id>\n  organon daemon stop <id>"
+        after_long_help = "Examples:\n  organon daemon list\n  organon daemon status\n  organon daemon logs <id>\n  organon daemon stop <id>\n  organon daemon autostart install\n  organon daemon autostart uninstall"
     )]
     Daemon {
         #[command(subcommand)]
@@ -222,6 +222,9 @@ pub(crate) enum Cmd {
         limit: usize,
         #[arg(long)]
         json: bool,
+        /// Include older entries from the local archive
+        #[arg(long)]
+        archive: bool,
     },
 
     /// Show reverse dependencies — what would break if this file changes
@@ -359,6 +362,11 @@ pub(crate) enum WorkspaceCmd {
 
 #[derive(Subcommand)]
 pub(crate) enum DaemonCmd {
+    /// Manage automatic startup for configured watch roots
+    Autostart {
+        #[command(subcommand)]
+        action: AutostartCmd,
+    },
     /// List known watch daemons
     List,
     /// Show daemon status; omit id to show all
@@ -371,4 +379,12 @@ pub(crate) enum DaemonCmd {
         #[arg(short, long, default_value = "80")]
         lines: usize,
     },
+}
+
+#[derive(Subcommand)]
+pub(crate) enum AutostartCmd {
+    /// Install and start a per-user service for configured watch roots
+    Install,
+    /// Stop and remove the per-user service
+    Uninstall,
 }
