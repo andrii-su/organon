@@ -2,18 +2,16 @@ repos:
   - repo: local
     hooks:
       - id: ruff-check-fix
-        name: ruff check --fix (ai)
-        entry: uv run --group dev ruff check ai --fix
+        name: ruff check --fix (Python)
+        entry: uv run --group dev ruff check --fix
         language: system
-        pass_filenames: false
-        files: ^ai/.*\.py$
+        files: ^(ai|tests|tools)/.*\.py$
 
       - id: ruff-format
-        name: ruff format (ai)
-        entry: uv run --group dev ruff format ai
+        name: ruff format (Python)
+        entry: uv run --group dev ruff format
         language: system
-        pass_filenames: false
-        files: ^ai/.*\.py$
+        files: ^(ai|tests|tools)/.*\.py$
 
       - id: rustfmt
         name: rustfmt (workspace)

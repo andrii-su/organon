@@ -1,7 +1,7 @@
 name: Release
 
 # Build prebuilt `organon` binaries for each tagged release and attach them to a
-# GitHub Release. Tag with `vX.Y.Z` (e.g. `git tag v1.3.0 && git push --tags`).
+# GitHub Release. The Package smoke workflow creates tags after merged PRs pass.
 #
 # The binaries cover the Rust core + CLI + MCP server. The Python AI layer
 # (semantic vectors) is installed separately via `uv sync`; the MCP graph,
