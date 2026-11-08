@@ -76,4 +76,4 @@ jobs:
         run: uv sync --locked --group dev
 
       - name: ruff check
-        run: uv run --locked --group dev ruff check ai tests
+        run: uv run --locked --group dev ruff check ai tests tools

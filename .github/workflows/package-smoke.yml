@@ -12,7 +12,8 @@ permissions:
 
 concurrency:
   group: package-smoke-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
+  queue: max
 
 jobs:
   docker-mcp:
@@ -160,3 +161,27 @@ jobs:
           path: |
             organon-${{ matrix.target }}.tar.gz
             organon-${{ matrix.target }}.tar.gz.sha256
+
+  release-merge:
+    name: Release merged pull request
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [docker-mcp, installed-binary, setup-script, release-artifacts]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: write
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          python-version: "3.11"
+
+      - name: Tag and dispatch release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash tools/release_merge.sh

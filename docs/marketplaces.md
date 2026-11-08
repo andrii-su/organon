@@ -6,8 +6,8 @@ Where Organon's MCP server can be listed, and what each channel needs.
 |---|---|---|
 | Claude Code plugin | ✅ live | `.claude-plugin/` manifest in this repo (done) |
 | Glama | ✅ live | `glama.json` in this repo (done) |
-| GitHub Releases (prebuilt binaries) | ✅ live | `.github/workflows/release.yml`, push a `vX.Y.Z` tag |
-| Docker image (GHCR) | ✅ live | `Dockerfile` + `.github/workflows/docker.yml`, push a `vX.Y.Z` tag |
+| GitHub Releases (prebuilt binaries) | ✅ live | Auto-dispatched after each merged PR passes CI and package smoke |
+| Docker image (GHCR) | ✅ live | Auto-dispatched from the same release tag |
 | MCP Registry (official) | ⏳ ready | submit `server.json` (OCI variant — the GHCR image satisfies it) |
 | Smithery | ⏳ ready | submit `smithery.yaml` (container deploy via the GHCR image) |
 
@@ -37,13 +37,12 @@ package publishing required.
 
 ### Prebuilt binaries
 
-Tag a release to build and attach binaries for macOS (arm64/x64) and Linux
-(x64/arm64):
-
-```bash
- git tag v1.4.0
- git push origin v1.4.0
-```
+Each merged PR to `main` gets a unique SemVer patch tag after CI and package
+smoke pass. The tag points to a release commit with matching Cargo and Python
+versions; the commit is reachable by the tag, not added to `main`. The first
+automated release uses the current `1.4.0` manifest baseline, then increments
+the patch number. The Release workflow attaches binaries for macOS (arm64/x64)
+and Linux (x64/arm64). Rerunning the coordinator reuses the existing tag.
 
 ### Docker image (GHCR)
 

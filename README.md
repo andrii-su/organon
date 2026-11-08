@@ -113,6 +113,11 @@ Prebuilt binaries for macOS and Linux are attached to each
 lifecycle, history, and impact tools run from the binary alone; semantic vector
 search needs the Python layer).
 
+Each pull request merged into `main` receives a SemVer patch release after CI
+and package smoke checks pass. The release tag points to a version-synchronized
+commit based on that merge; GitHub Releases and the Docker image are published
+from the tag. Direct pushes to `main` do not create releases.
+
 The first semantic index downloads the embedding model (`BAAI/bge-small-en-v1.5`, ~130 MB) once, then runs fully offline.
 
 ### Docker
