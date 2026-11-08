@@ -1,0 +1,62 @@
+name: Organon self-dogfood
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "ai/**"
+      - "crates/organon-cli/**"
+      - "crates/organon-core/**"
+      - "crates/organon-mcp/**"
+      - "tests/self_dogfood.py"
+      - "tests/mcp_smoke.py"
+      - ".github/workflows/self-dogfood.yml"
+  schedule:
+    - cron: "17 4 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  self-dogfood:
+    name: Index and query Organon source
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          python-version: "3.11"
+          enable-cache: true
+
+      - name: Cache embedding model
+        uses: actions/cache@v6
+        with:
+          path: ${{ runner.temp }}/fastembed-cache
+          key: ${{ runner.os }}-fastembed-bge-small-en-v1.5
+
+      - name: Install Python deps
+        run: uv sync --locked --group dev
+
+      - name: Build Organon
+        run: cargo build --locked --bin organon
+
+      - name: Index and query Organon source
+        env:
+          FASTEMBED_CACHE_PATH: ${{ runner.temp }}/fastembed-cache
+        run: uv run --locked --group dev python tests/self_dogfood.py target/debug/organon
