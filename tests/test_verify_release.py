@@ -43,6 +43,7 @@ def test_all_archives_are_required_and_cross_platform_binary_is_inspected(tmp_pa
     binary = b"macOS binary contents"
     with tarfile.open(archive, "w:gz") as tar:
         member = tarfile.TarInfo("organon-aarch64-apple-darwin/organon")
+        member.mode = 0o755
         member.size = len(binary)
         tar.addfile(member, io.BytesIO(binary))
     (tmp_path / f"{archive.name}.sha256").write_text(
@@ -51,3 +52,18 @@ def test_all_archives_are_required_and_cross_platform_binary_is_inspected(tmp_pa
     check_archive(archive, "v1.4.1", execute=False)
     with pytest.raises(FileNotFoundError):
         check_archives(tmp_path, "v1.4.1")
+
+
+def test_archive_check_rejects_binary_without_executable_mode(tmp_path: Path):
+    archive = tmp_path / "organon-x86_64-unknown-linux-gnu.tar.gz"
+    binary = b"#!/bin/sh\necho 'organon 1.4.1'\n"
+    with tarfile.open(archive, "w:gz") as tar:
+        member = tarfile.TarInfo("organon-x86_64-unknown-linux-gnu/organon")
+        member.mode = 0o644
+        member.size = len(binary)
+        tar.addfile(member, io.BytesIO(binary))
+    (tmp_path / f"{archive.name}.sha256").write_text(
+        f"{hashlib.sha256(archive.read_bytes()).hexdigest()}  {archive.name}\n"
+    )
+    with pytest.raises(ValueError, match="executable"):
+        check_archive(archive, "v1.4.1")

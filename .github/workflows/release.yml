@@ -104,10 +104,15 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v7
+
       - uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true
+
+      - name: Verify archives before publication
+        run: python3 tools/verify_release.py archives dist "$GITHUB_REF_NAME"
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v3
@@ -123,6 +128,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      attestations: read
     steps:
       - uses: actions/checkout@v7
 

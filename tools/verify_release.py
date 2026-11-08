@@ -54,12 +54,14 @@ def check_archive(archive: Path, tag: str, *, execute: bool = True) -> None:
         member = tar.getmember(member_name)
         if not member.isfile():
             raise ValueError("release binary is not a regular file")
+        if member.mode & 0o111 == 0:
+            raise ValueError("release binary is not executable in the archive")
         source = tar.extractfile(member)
         if source is None:
             raise ValueError("release binary missing from archive")
         binary = Path(temporary) / "organon"
         binary.write_bytes(source.read())
-        binary.chmod(0o755)
+        binary.chmod(member.mode & 0o777)
         if execute:
             output = subprocess.run(
                 [str(binary), "--version"], capture_output=True, text=True, check=True, timeout=10
