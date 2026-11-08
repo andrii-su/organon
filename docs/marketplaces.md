@@ -42,7 +42,9 @@ smoke pass. The tag points to a release commit with matching Cargo and Python
 versions; the commit is reachable by the tag, not added to `main`. The first
 automated release uses the current `1.4.0` manifest baseline, then increments
 the patch number. The Release workflow attaches binaries for macOS (arm64/x64)
-and Linux (x64/arm64). Rerunning the coordinator reuses the existing tag.
+and Linux (x64/arm64). It verifies every published archive and the Linux
+binary's version, and records build attestations. Rerunning the coordinator
+reuses the existing tag. See [CI and release checks](ci.md).
 
 ### Docker image (GHCR)
 

@@ -23,6 +23,11 @@ concurrency:
 jobs:
   publish:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
     steps:
       - uses: actions/checkout@v7
 
@@ -47,6 +52,7 @@ jobs:
         uses: docker/setup-buildx-action@v4
 
       - name: Build and push
+        id: build
         uses: docker/build-push-action@v7
         with:
           context: .
@@ -56,3 +62,26 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Attest published image
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: actions/attest@v4
+        with:
+          subject-name: ghcr.io/${{ github.repository_owner }}/organon
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+
+      - name: Pull and run published image
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        run: |
+          set -euo pipefail
+          image="ghcr.io/${{ github.repository_owner }}/organon@${{ steps.build.outputs.digest }}"
+          docker pull "$image"
+          docker run --rm "$image" --version | grep -Fx "organon ${GITHUB_REF_NAME#v}"
+
+      - name: Verify image attestation
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh attestation verify "oci://ghcr.io/${{ github.repository_owner }}/organon@${{ steps.build.outputs.digest }}" --repo "$GITHUB_REPOSITORY"

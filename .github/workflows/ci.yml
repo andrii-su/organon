@@ -5,6 +5,10 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+
+permissions:
+  contents: read
+
 jobs:
   rust:
     name: Rust tests
@@ -29,6 +33,20 @@ jobs:
 
       - name: MCP protocol smoke test
         run: python3 tests/mcp_smoke.py target/debug/organon
+
+      - name: Filesystem query contract
+        run: python3 tests/organon_contract.py target/debug/organon
+
+      - name: Previous release database migration
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          previous="$(gh release view --json tagName --jq .tagName)"
+          mkdir -p "$RUNNER_TEMP/previous-release"
+          gh release download "$previous" --pattern 'organon-x86_64-unknown-linux-gnu.tar.gz' --dir "$RUNNER_TEMP/previous-release"
+          tar -xzf "$RUNNER_TEMP/previous-release/organon-x86_64-unknown-linux-gnu.tar.gz" -C "$RUNNER_TEMP/previous-release"
+          python3 tests/migration_smoke.py "$RUNNER_TEMP/previous-release/organon-x86_64-unknown-linux-gnu/organon" target/debug/organon
 
       - name: cargo test
         run: cargo test --locked

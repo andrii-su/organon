@@ -64,7 +64,8 @@ def stub_tools(tmp_path: Path) -> Path:
         "elif args[0] == 'api' and '/runs?' in args[1]:\n"
         "  print(json.dumps({'workflow_runs': [{'head_sha': os.environ['GITHUB_SHA'], "
         "'event': 'push', 'status': 'completed', "
-        "'conclusion': os.environ.get('FAKE_CI', 'success')}] }))\n"
+        "'conclusion': os.environ.get('FAKE_SECURITY' if '/security.yml/' in args[1] "
+        "else 'FAKE_CI', 'success')}] }))\n"
         "elif args[:2] == ['workflow', 'run']:\n"
         "  with open(os.environ['FAKE_DISPATCH_LOG'], 'a') as f: "
         "f.write(' '.join(args) + '\\n')\n"
@@ -128,6 +129,13 @@ def test_release_merge_skips_non_pr_and_failed_ci(release_repo):
     assert failed.returncode != 0
     assert git(root, "tag", "--list", "v*") == "v1.3.0"
     assert not (tmp_path / "dispatch.log").exists()
+
+
+def test_release_merge_blocks_on_failed_security_scan(release_repo):
+    root, tmp_path, sha = release_repo
+    failed = run_release(root, tmp_path, sha, FAKE_SECURITY="failure")
+    assert failed.returncode != 0
+    assert git(root, "tag", "--list", "v*") == "v1.3.0"
 
 
 def test_next_merge_increments_patch_from_previous_tag(release_repo):

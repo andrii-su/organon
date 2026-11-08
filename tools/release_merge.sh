@@ -16,20 +16,25 @@ if [[ -z "$pr" ]]; then
   exit 0
 fi
 
-echo "Waiting for CI on merged PR #$pr ($GITHUB_SHA)."
-ci_state=pending
-for attempt in {1..60}; do
-  runs="$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?head_sha=$GITHUB_SHA&event=push&per_page=20")"
-  ci_state="$(python3 tools/release_version.py ci-state --sha "$GITHUB_SHA" <<< "$runs")"
-  if [[ "$ci_state" != pending ]]; then
-    break
+wait_for_workflow() {
+  local workflow="$1" state=pending runs
+  echo "Waiting for $workflow on merged PR #$pr ($GITHUB_SHA)."
+  for attempt in {1..60}; do
+    runs="$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/$workflow/runs?head_sha=$GITHUB_SHA&event=push&per_page=20")"
+    state="$(python3 tools/release_version.py ci-state --sha "$GITHUB_SHA" <<< "$runs")"
+    if [[ "$state" != pending ]]; then
+      break
+    fi
+    sleep 10
+  done
+  if [[ "$state" != success ]]; then
+    echo "$workflow did not pass for $GITHUB_SHA (state: $state)." >&2
+    return 1
   fi
-  sleep 10
-done
-if [[ "$ci_state" != success ]]; then
-  echo "CI did not pass for $GITHUB_SHA (state: $ci_state)." >&2
-  exit 1
-fi
+}
+
+wait_for_workflow ci.yml
+wait_for_workflow security.yml
 
 git fetch --force origin 'refs/tags/*:refs/tags/*'
 tag="$(python3 tools/release_version.py find-tag --merge-sha "$GITHUB_SHA")"
