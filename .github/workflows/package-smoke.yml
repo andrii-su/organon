@@ -22,8 +22,16 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      - uses: docker/setup-buildx-action@v4
+
       - name: Build Docker image
-        run: docker build --pull -t organon:package-smoke .
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          load: true
+          tags: organon:package-smoke
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
       - name: Start MCP over stdio
         run: |
@@ -47,6 +55,16 @@ jobs:
           python-version: "3.11"
 
       - run: uv sync --locked --group dev
+
+      - name: Cache Rust build
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-native-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-native-cargo-
 
       - name: Build and install binary
         run: |
@@ -73,6 +91,16 @@ jobs:
         uses: astral-sh/setup-uv@v7
         with:
           python-version: "3.11"
+
+      - name: Cache Rust build
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-native-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-native-cargo-
 
       - name: Run setup.sh
         env:
@@ -114,6 +142,16 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+
+      - name: Cache Rust target
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-${{ matrix.target }}-cargo-
 
       - name: Install ARM Linux linker
         if: matrix.target == 'aarch64-unknown-linux-gnu'
