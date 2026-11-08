@@ -223,11 +223,13 @@ A session is scoped to the current directory by default; pass a path, `--scope <
 | Tool | Description |
 |---|---|
 | `search_files` | Semantic, FTS, or hybrid search with metadata filters |
+| `query_files` | Paged, explained file candidates for endpoints, functionality, and models |
 | `search_similar` | Find files similar to a given file (vector) |
 | `get_entity` | Full metadata and lifecycle state for a path |
 | `get_graph` | Import/reference graph rooted at a file |
 | `get_impact` | Reverse dependencies — what breaks if this file changes |
 | `get_history` | Lifecycle and content-change history for a file |
+| `query_history_events` | Paged file events between inclusive UTC dates, optionally including the archive |
 | `get_file_content` | Read file content (optionally a line range) |
 | `build_context` | Compact, ranked context pack for a task |
 | `find_duplicates` | Files sharing an identical content hash |
@@ -235,6 +237,20 @@ A session is scoped to the current directory by default; pass a path, `--scope <
 | `list_saved_queries` | List named queries saved with `organon query save` |
 | `run_saved_query` | Execute a saved query |
 | `graph_stats` | Entity-graph statistics |
+
+`query_files` uses `kind=route`, `functionality`, or `model`. For functionality
+and model queries, `match_percent` is the number of distinct literal query terms
+found in indexed text or the path, divided by the number of distinct query
+terms and rounded down. Route percentages use exact route text or the longest
+contiguous segment match. These percentages measure query coverage, not the
+probability that a file is responsible for the functionality. Connected and
+optional semantic candidates have no percentage. Results include a coverage
+note because ignored, sensitive, unindexed, or truncated content may be absent.
+
+`query_history_events` accepts inclusive UTC `from_date` and `to_date` values
+(`YYYY-MM-DD`), with optional `event`, `path_prefix`, `include_archive`,
+`limit`, and `offset`. Each event reports whether it was archived and whether
+the watcher observed a gap before recording it.
 
 ## Claude Code
 

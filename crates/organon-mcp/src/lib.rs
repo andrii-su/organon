@@ -89,6 +89,53 @@ pub struct QueryRouteFilesRequest {
     pub offset: Option<usize>,
 }
 
+#[derive(Debug, Clone, Copy, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum FileQueryKind {
+    Route,
+    Functionality,
+    Model,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct QueryFilesRequest {
+    pub query: String,
+    pub kind: FileQueryKind,
+    pub path_prefix: Option<String>,
+    pub limit: Option<usize>,
+    pub offset: Option<usize>,
+    /// Include vector-only candidates without a match percentage.
+    pub include_semantic: Option<bool>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct QueryFilesResponse {
+    pub items: Vec<RouteFileCandidate>,
+    pub has_more: bool,
+    pub coverage_note: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct QueryHistoryEventsRequest {
+    /// First UTC calendar date, inclusive (YYYY-MM-DD).
+    pub from_date: String,
+    /// Last UTC calendar date, inclusive (YYYY-MM-DD).
+    pub to_date: String,
+    pub path_prefix: Option<String>,
+    /// created, modified, renamed, deleted, or lifecycle.
+    pub event: Option<String>,
+    pub include_archive: Option<bool>,
+    pub limit: Option<usize>,
+    pub offset: Option<usize>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct QueryHistoryEventsResponse {
+    pub items: Vec<serde_json::Value>,
+    pub has_more: bool,
+    pub coverage_note: String,
+}
+
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct RouteFileCandidate {
     pub path: String,
@@ -402,6 +449,139 @@ impl McpService {
 }
 
 impl McpService {
+    pub fn query_files(
+        &self,
+        query: &str,
+        kind: FileQueryKind,
+        path_prefix: Option<&str>,
+        limit: usize,
+        offset: usize,
+        include_semantic: bool,
+    ) -> Result<QueryFilesResponse> {
+        if query.trim().is_empty() {
+            bail!("query must not be empty");
+        }
+        let limit = limit.clamp(1, MAX_MCP_RESULTS);
+        if matches!(kind, FileQueryKind::Route) {
+            let response = self.query_route_files(query, path_prefix, limit, offset)?;
+            return Ok(QueryFilesResponse {
+                items: response.items,
+                has_more: response.has_more,
+                coverage_note: response.coverage_note,
+            });
+        }
+        let prefix = self.effective_prefix(path_prefix)?;
+        let graph = self.open_graph()?;
+        let direct = graph.find_text_matches(query, prefix.as_deref())?;
+        let allowed = |path: &str| {
+            self.path_in_scope(path)
+                && prefix
+                    .as_deref()
+                    .is_none_or(|scope| path_within_prefix(path, scope))
+        };
+        let mut candidates = Vec::new();
+        let mut seen = BTreeSet::new();
+        for item in &direct {
+            if allowed(&item.path) && seen.insert(item.path.clone()) {
+                candidates.push(RouteFileCandidate {
+                    path: item.path.clone(),
+                    kind: "direct".to_string(),
+                    match_percent: Some(item.match_percent),
+                    reason: item.reason.clone(),
+                });
+            }
+        }
+        for item in direct.iter().filter(|item| item.match_percent == 100) {
+            for (from, to, relation) in graph.get_relations(&item.path)? {
+                let (other, reason) = if to == item.path {
+                    (from, format!("{relation} {}", item.path))
+                } else {
+                    (to, format!("{} {relation} this file", item.path))
+                };
+                if allowed(&other) && seen.insert(other.clone()) {
+                    candidates.push(RouteFileCandidate {
+                        path: other,
+                        kind: "connected".to_string(),
+                        match_percent: None,
+                        reason,
+                    });
+                }
+            }
+        }
+        if include_semantic {
+            let filter = build_find_filter(None, None, None, None, MAX_MCP_RESULTS)?;
+            for hit in self.search_files(
+                query,
+                MAX_MCP_RESULTS,
+                prefix.as_deref(),
+                SearchMode::Vector,
+                &filter,
+                false,
+            )? {
+                if allowed(&hit.path) && seen.insert(hit.path.clone()) {
+                    candidates.push(RouteFileCandidate {
+                        path: hit.path,
+                        kind: "semantic".to_string(),
+                        match_percent: None,
+                        reason: "vector similarity candidate; no literal match percentage"
+                            .to_string(),
+                    });
+                }
+            }
+        }
+        let has_more = offset.saturating_add(limit) < candidates.len();
+        Ok(QueryFilesResponse {
+            items: candidates.into_iter().skip(offset).take(limit).collect(),
+            has_more,
+            coverage_note: "Direct percentages are literal query-token coverage in indexed text or path, not relevance probability. Connected and semantic candidates have no percentage. Unindexed, ignored, sensitive, or truncated content may be absent; semantic candidates are capped at 100.".to_string(),
+        })
+    }
+
+    pub fn query_history_events(
+        &self,
+        request: &QueryHistoryEventsRequest,
+    ) -> Result<QueryHistoryEventsResponse> {
+        let from = NaiveDate::parse_from_str(&request.from_date, "%Y-%m-%d")?;
+        let to = NaiveDate::parse_from_str(&request.to_date, "%Y-%m-%d")?;
+        if to < from {
+            bail!("to_date must be on or after from_date");
+        }
+        let from_timestamp = from.and_hms_opt(0, 0, 0).unwrap().and_utc().timestamp();
+        let to_exclusive = to
+            .succ_opt()
+            .ok_or_else(|| anyhow::anyhow!("to_date is out of range"))?
+            .and_hms_opt(0, 0, 0)
+            .unwrap()
+            .and_utc()
+            .timestamp();
+        if let Some(event) = request.event.as_deref() {
+            if !["created", "modified", "renamed", "deleted", "lifecycle"].contains(&event) {
+                bail!("invalid event '{event}'");
+            }
+        }
+        let prefix = self.effective_prefix(request.path_prefix.as_deref())?;
+        let limit = request.limit.unwrap_or(20).clamp(1, MAX_MCP_RESULTS);
+        let mut entries = self.open_graph()?.find_history_events(
+            from_timestamp,
+            to_exclusive,
+            prefix.as_deref(),
+            request.event.as_deref(),
+            request.include_archive.unwrap_or(false),
+            limit,
+            request.offset.unwrap_or(0),
+        )?;
+        let has_more = entries.len() > limit;
+        entries.truncate(limit);
+        Ok(QueryHistoryEventsResponse {
+            items: entries
+                .into_iter()
+                .map(serde_json::to_value)
+                .collect::<serde_json::Result<Vec<_>>>()?,
+            has_more,
+            coverage_note: "UTC calendar dates are inclusive. Scope filters the recorded path, so a rename out of scope may be absent. Events reflect watcher observations; observation_gap=true means intermediate changes may be missing. Archived events appear only with include_archive=true.".to_string(),
+        })
+    }
+
     pub fn query_route_files(
         &self,
         query: &str,
@@ -421,7 +601,7 @@ impl McpService {
             self.path_in_scope(path)
                 && prefix
                     .as_deref()
-                    .is_none_or(|scope| path == scope || path.starts_with(&format!("{scope}/")))
+                    .is_none_or(|scope| path_within_prefix(path, scope))
         };
         for route in graph.get_indexed_routes(query)? {
             if !allowed(&route.handler_path) {
@@ -460,9 +640,9 @@ impl McpService {
             for (from, to, relation) in graph.get_relations(&item.path)? {
                 let other = if from == item.path { to } else { from };
                 if !self.path_in_scope(&other)
-                    || prefix.as_deref().is_some_and(|scope| {
-                        other != scope && !other.starts_with(&format!("{scope}/"))
-                    })
+                    || prefix
+                        .as_deref()
+                        .is_some_and(|scope| !path_within_prefix(&other, scope))
                     || !seen.insert(other.clone())
                 {
                     continue;
@@ -1091,7 +1271,7 @@ impl McpService {
         match (&self.scope, requested) {
             (Some(scope), Some(prefix)) => {
                 let scope = scope.to_string_lossy();
-                if prefix == scope || prefix.starts_with(&format!("{scope}/")) {
+                if path_within_prefix(&prefix, &scope) {
                     Ok(Some(prefix))
                 } else {
                     bail!("path_prefix is outside MCP session scope: {scope}");
@@ -1120,7 +1300,7 @@ impl McpService {
         match &self.scope {
             Some(scope) => {
                 let scope = scope.to_string_lossy();
-                path == scope || path.starts_with(&format!("{scope}/"))
+                path_within_prefix(path, &scope)
             }
             None => true,
         }
@@ -1204,6 +1384,39 @@ impl OrganonMcpServer {
             service: Arc::new(service),
             tool_router: Self::tool_router(),
         }
+    }
+
+    #[tool(
+        description = "Find files for an endpoint, functionality, or model. Returns paged direct, connected, and optional semantic candidates with reasons; percentages measure literal query-token coverage only, never relevance probability."
+    )]
+    async fn query_files(
+        &self,
+        Parameters(req): Parameters<QueryFilesRequest>,
+    ) -> Result<Json<QueryFilesResponse>, String> {
+        self.service
+            .query_files(
+                &req.query,
+                req.kind,
+                req.path_prefix.as_deref(),
+                req.limit.unwrap_or(20),
+                req.offset.unwrap_or(0),
+                req.include_semantic.unwrap_or(false),
+            )
+            .map(Json)
+            .map_err(|error| error.to_string())
+    }
+
+    #[tool(
+        description = "Find observed file history events between inclusive UTC dates (YYYY-MM-DD), optionally including archived events. Filter by scope and event; results are paged and show observation gaps."
+    )]
+    async fn query_history_events(
+        &self,
+        Parameters(req): Parameters<QueryHistoryEventsRequest>,
+    ) -> Result<Json<QueryHistoryEventsResponse>, String> {
+        self.service
+            .query_history_events(&req)
+            .map(Json)
+            .map_err(|error| error.to_string())
     }
 
     #[tool(
@@ -1681,6 +1894,12 @@ fn canonical_path_string(path: &str) -> String {
         .to_string()
 }
 
+fn path_within_prefix(path: &str, prefix: &str) -> bool {
+    path == prefix
+        || (prefix == "/" && path.starts_with('/'))
+        || path.starts_with(&format!("{prefix}/"))
+}
+
 fn normalize_request_path(path: &str) -> String {
     canonical_path_string(path)
 }
@@ -1832,6 +2051,166 @@ mod tests {
         assert!(response.items.is_empty());
         assert!(!response.has_more);
         assert!(response.coverage_note.contains("indexed text"));
+    }
+
+    #[test]
+    fn query_files_explains_direct_and_model_consumers_without_invented_percentages() {
+        let (service, graph, _file) = temp_scoped_service("/tmp/work");
+        for path in [
+            "/tmp/work/models.py",
+            "/tmp/work/handler.py",
+            "/tmp/work/billing.py",
+            "/tmp/work/invoice/entry.py",
+            "/tmp/other/secret.py",
+        ] {
+            graph.upsert(&test_entity(path)).unwrap();
+        }
+        graph
+            .update_fts("/tmp/work/models.py", "models.py", "class Order: pass")
+            .unwrap();
+        graph
+            .update_fts("/tmp/work/billing.py", "billing.py", "billing job")
+            .unwrap();
+        graph
+            .update_fts("/tmp/work/invoice/entry.py", "entry.py", "unrelated text")
+            .unwrap();
+        graph
+            .upsert_relation("/tmp/work/handler.py", "/tmp/work/models.py", "imports")
+            .unwrap();
+        graph
+            .upsert_relation("/tmp/other/secret.py", "/tmp/work/models.py", "imports")
+            .unwrap();
+
+        let model = service
+            .query_files("Order", FileQueryKind::Model, None, 1, 0, false)
+            .unwrap();
+        assert_eq!(model.items[0].path, "/tmp/work/models.py");
+        assert_eq!(model.items[0].match_percent, Some(100));
+        assert!(model.has_more);
+        let consumer = service
+            .query_files("Order", FileQueryKind::Model, None, 1, 1, false)
+            .unwrap();
+        assert_eq!(consumer.items[0].path, "/tmp/work/handler.py");
+        assert_eq!(consumer.items[0].kind, "connected");
+        assert_eq!(consumer.items[0].match_percent, None);
+        assert!(consumer.items[0].reason.contains("imports"));
+        assert!(!consumer.has_more);
+
+        let partial = service
+            .query_files(
+                "billing invoice",
+                FileQueryKind::Functionality,
+                None,
+                20,
+                0,
+                false,
+            )
+            .unwrap();
+        assert_eq!(partial.items[0].path, "/tmp/work/billing.py");
+        assert_eq!(partial.items[0].match_percent, Some(50));
+        let path_only = service
+            .query_files("invoice", FileQueryKind::Functionality, None, 20, 0, false)
+            .unwrap();
+        assert_eq!(path_only.items[0].path, "/tmp/work/invoice/entry.py");
+        assert_eq!(path_only.items[0].match_percent, Some(100));
+        assert!(service
+            .query_files(
+                "Order",
+                FileQueryKind::Model,
+                Some("/tmp/other"),
+                20,
+                0,
+                false
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn root_scope_includes_descendants_for_file_queries() {
+        let (service, graph, _file) = temp_scoped_service("/");
+        graph.upsert(&test_entity("/tmp/work/a.rs")).unwrap();
+        graph
+            .update_fts("/tmp/work/a.rs", "a.rs", "invoice")
+            .unwrap();
+        let response = service
+            .query_files("invoice", FileQueryKind::Functionality, None, 20, 0, false)
+            .unwrap();
+        assert_eq!(response.items[0].path, "/tmp/work/a.rs");
+    }
+
+    #[test]
+    fn query_history_events_filters_dates_scope_event_and_archive() {
+        let (service, _graph, file) = temp_scoped_service("/tmp/work");
+        let connection = rusqlite::Connection::open(file.path()).unwrap();
+        let timestamp = |day: u32| {
+            NaiveDate::from_ymd_opt(2026, 11, day)
+                .unwrap()
+                .and_hms_opt(12, 0, 0)
+                .unwrap()
+                .and_utc()
+                .timestamp()
+        };
+        for (table, id, path, event, day, gap) in [
+            ("entity_history", 1, "/tmp/work/a.rs", "modified", 2, 1),
+            ("entity_history", 2, "/tmp/work/a.rs", "deleted", 3, 0),
+            (
+                "entity_history",
+                3,
+                "/tmp/other/secret.rs",
+                "modified",
+                2,
+                0,
+            ),
+            (
+                "entity_history_archive",
+                4,
+                "/tmp/work/a.rs",
+                "created",
+                1,
+                0,
+            ),
+        ] {
+            connection
+                .execute(
+                    &format!("INSERT INTO {table} (id, entity_id, path, event, recorded_at, observation_gap) VALUES (?1, 'id', ?2, ?3, ?4, ?5)"),
+                    rusqlite::params![id, path, event, timestamp(day), gap],
+                )
+                .unwrap();
+        }
+        let mut request = QueryHistoryEventsRequest {
+            from_date: "2026-11-01".to_string(),
+            to_date: "2026-11-02".to_string(),
+            path_prefix: None,
+            event: None,
+            include_archive: Some(true),
+            limit: Some(1),
+            offset: Some(0),
+        };
+        let page = service.query_history_events(&request).unwrap();
+        assert_eq!(page.items[0]["event"], "modified");
+        assert_eq!(page.items[0]["observation_gap"], true);
+        assert!(page.has_more);
+        request.offset = Some(1);
+        let page = service.query_history_events(&request).unwrap();
+        assert_eq!(page.items[0]["event"], "created");
+        assert_eq!(page.items[0]["archived"], true);
+        assert!(!page.has_more);
+        request.offset = None;
+        request.include_archive = Some(false);
+        request.event = Some("created".to_string());
+        assert!(service
+            .query_history_events(&request)
+            .unwrap()
+            .items
+            .is_empty());
+        request.event = Some("bogus".to_string());
+        assert!(service.query_history_events(&request).is_err());
+        request.event = None;
+        request.path_prefix = Some("/tmp/other".to_string());
+        assert!(service.query_history_events(&request).is_err());
+        request.path_prefix = None;
+        request.to_date = "2026-10-31".to_string();
+        assert!(service.query_history_events(&request).is_err());
     }
 
     #[test]
@@ -2047,7 +2426,9 @@ mod tests {
 
         for name in [
             "search_files",
+            "query_files",
             "query_route_files",
+            "query_history_events",
             "build_context",
             "get_entity",
             "list_by_lifecycle",

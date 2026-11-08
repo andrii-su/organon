@@ -6,6 +6,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+from datetime import UTC, datetime
 from pathlib import Path
 
 from mcp_smoke import _build_graph, _json_responses
@@ -44,6 +45,10 @@ def run(binary: Path) -> None:
                 (str(route), route.name, route.read_text()),
             )
             conn.execute(
+                "INSERT INTO entities_fts(path, name, content) VALUES (?, ?, ?)",
+                (str(model), model.name, model.read_text()),
+            )
+            conn.execute(
                 "INSERT INTO relationships(from_path, to_path, kind, created_at) VALUES (?, ?, ?, 1)",
                 (str(route), str(model), "imports"),
             )
@@ -52,6 +57,7 @@ def run(binary: Path) -> None:
                 ("/x/sds/sd", str(route), "[]"),
             )
 
+        today = datetime.now(UTC).date().isoformat()
         messages = [
             {
                 "jsonrpc": "2.0",
@@ -69,6 +75,18 @@ def run(binary: Path) -> None:
             call_tool(4, "build_context", {"path": str(route), "mode": "fts"}),
             call_tool(5, "get_impact", {"path": str(model)}),
             call_tool(6, "get_history", {"path": str(route)}),
+            call_tool(7, "query_files", {"query": "get_order", "kind": "functionality"}),
+            call_tool(8, "query_files", {"query": "Order", "kind": "model"}),
+            call_tool(10, "query_files", {"query": "/x/sds/sd", "kind": "route"}),
+            call_tool(
+                9,
+                "query_history_events",
+                {
+                    "from_date": today,
+                    "to_date": today,
+                    "event": "modified",
+                },
+            ),
         ]
         output = subprocess.run(
             [str(binary), "--db", str(db), "mcp", "--scope", str(workspace)],
@@ -80,7 +98,7 @@ def run(binary: Path) -> None:
             env={**os.environ, "ORGANON_DB": str(db)},
         ).stdout
         responses = _json_responses(output)
-        for request_id in range(2, 7):
+        for request_id in range(2, 11):
             assert "error" not in responses[request_id], responses[request_id]
         assert any(
             item["path"] == str(route)
@@ -101,6 +119,25 @@ def run(binary: Path) -> None:
         assert any(
             item["event"] == "modified"
             for item in responses[6]["result"]["structuredContent"]["entries"]
+        )
+        assert any(
+            item["path"] == str(route) and item["match_percent"] == 100
+            for item in responses[7]["result"]["structuredContent"]["items"]
+        )
+        model_candidates = responses[8]["result"]["structuredContent"]["items"]
+        assert any(
+            item["path"] == str(model) and item["kind"] == "direct" for item in model_candidates
+        )
+        assert any(
+            item["path"] == str(route) and item["kind"] == "direct" for item in model_candidates
+        )
+        assert any(
+            item["path"] == str(route) and item["event"] == "modified"
+            for item in responses[9]["result"]["structuredContent"]["items"]
+        )
+        assert any(
+            item["path"] == str(route) and item["match_percent"] == 100
+            for item in responses[10]["result"]["structuredContent"]["items"]
         )
 
 

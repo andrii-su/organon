@@ -27,10 +27,8 @@ launched from. It exposes search, entity-graph, lifecycle, impact, history,
 duplicate-detection, and context-pack tools. See the
 [main README](https://github.com/andrii-su/organon#mcp-tools) for the full tool list.
 
-The `query-files` skill handles questions such as “Which files are responsible
-for `/x/sds/sd`?” It asks the `query_route_files` MCP tool for direct indexed
-matches and one-hop file relationships, reports the evidence without sending
-file contents, then opens selected files if needed. Run `organon index` for the
-workspace first. Statically resolvable FastAPI router prefixes are combined
-into full routes; dynamic prefixes, unindexed files, or truncated content may
-still be absent from the list.
+The `query-files` skill handles endpoint, functionality, model-use, and
+file-history questions. It uses `query_files` for explained file candidates and
+`query_history_events` for observed changes between dates. Run `organon index`
+for the workspace first. Percentages describe literal query coverage, not
+relevance probability; unindexed files and missed watcher events may be absent.
