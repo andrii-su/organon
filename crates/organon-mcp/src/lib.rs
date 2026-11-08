@@ -81,6 +81,29 @@ pub struct SearchHit {
     pub explanation: Option<SearchExplanation>,
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct QueryRouteFilesRequest {
+    pub query: String,
+    pub path_prefix: Option<String>,
+    pub limit: Option<usize>,
+    pub offset: Option<usize>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct RouteFileCandidate {
+    pub path: String,
+    pub kind: String,
+    pub match_percent: Option<u8>,
+    pub reason: String,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct QueryRouteFilesResponse {
+    pub items: Vec<RouteFileCandidate>,
+    pub has_more: bool,
+    pub coverage_note: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct EntityRecord {
     pub id: String,
@@ -260,13 +283,16 @@ pub struct GetHistoryRequest {
     pub path: String,
     /// Maximum number of entries to return (default 20).
     pub limit: Option<usize>,
+    /// Include older entries from the local archive. Archived entries are marked `archived: true`.
+    pub include_archive: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct HistoryResponse {
     pub path: String,
     /// History entries, newest first. Fields: event, recorded_at, old_lifecycle, new_lifecycle,
-    /// old_path (rename), size_bytes, content_hash.
+    /// old_path (rename), size_bytes, content_hash, text_change, detail_status,
+    /// observation_gap.
     pub entries: Vec<serde_json::Value>,
     pub total: usize,
 }
@@ -376,6 +402,87 @@ impl McpService {
 }
 
 impl McpService {
+    pub fn query_route_files(
+        &self,
+        query: &str,
+        path_prefix: Option<&str>,
+        limit: usize,
+        offset: usize,
+    ) -> Result<QueryRouteFilesResponse> {
+        if !query.starts_with('/') || query.trim_matches('/').is_empty() {
+            bail!("query must be a route path beginning with '/'");
+        }
+        let prefix = self.effective_prefix(path_prefix)?;
+        let graph = self.open_graph()?;
+        let direct = graph.find_route_matches(query, prefix.as_deref(), usize::MAX, 0)?;
+        let mut candidates = Vec::new();
+        let mut seen = BTreeSet::new();
+        let allowed = |path: &str| {
+            self.path_in_scope(path)
+                && prefix
+                    .as_deref()
+                    .is_none_or(|scope| path == scope || path.starts_with(&format!("{scope}/")))
+        };
+        for route in graph.get_indexed_routes(query)? {
+            if !allowed(&route.handler_path) {
+                continue;
+            }
+            if seen.insert(route.handler_path.clone()) {
+                candidates.push(RouteFileCandidate {
+                    path: route.handler_path.clone(),
+                    kind: "direct".to_string(),
+                    match_percent: Some(100),
+                    reason: "composed route from indexed router registrations".to_string(),
+                });
+            }
+            for path in route.provenance {
+                if allowed(&path) && seen.insert(path.clone()) {
+                    candidates.push(RouteFileCandidate {
+                        path,
+                        kind: "connected".to_string(),
+                        match_percent: None,
+                        reason: format!("defines a prefix or registration for {query}"),
+                    });
+                }
+            }
+        }
+        for item in &direct {
+            if seen.insert(item.path.clone()) {
+                candidates.push(RouteFileCandidate {
+                    path: item.path.clone(),
+                    kind: "direct".to_string(),
+                    match_percent: Some(item.match_percent),
+                    reason: item.reason.clone(),
+                });
+            }
+        }
+        for item in direct.iter().filter(|item| item.match_percent == 100) {
+            for (from, to, relation) in graph.get_relations(&item.path)? {
+                let other = if from == item.path { to } else { from };
+                if !self.path_in_scope(&other)
+                    || prefix.as_deref().is_some_and(|scope| {
+                        other != scope && !other.starts_with(&format!("{scope}/"))
+                    })
+                    || !seen.insert(other.clone())
+                {
+                    continue;
+                }
+                candidates.push(RouteFileCandidate {
+                    path: other,
+                    kind: "connected".to_string(),
+                    match_percent: None,
+                    reason: format!("{relation} via {}", item.path),
+                });
+            }
+        }
+        let has_more = offset.saturating_add(limit) < candidates.len();
+        Ok(QueryRouteFilesResponse {
+            items: candidates.into_iter().skip(offset).take(limit).collect(),
+            has_more,
+            coverage_note: "Candidates come from indexed text, stored file relationships, and statically resolved FastAPI routes; dynamic prefixes, unindexed files, or truncated content may be absent.".to_string(),
+        })
+    }
+
     pub fn get_entity(&self, path: &str) -> Result<Option<Entity>> {
         let path = normalize_request_path(path);
         self.ensure_in_scope(&path)?;
@@ -441,10 +548,21 @@ impl McpService {
     }
 
     pub fn get_history(&self, path: &str, limit: usize) -> Result<HistoryResponse> {
+        self.get_history_with_archive(path, limit, false)
+    }
+
+    pub fn get_history_with_archive(
+        &self,
+        path: &str,
+        limit: usize,
+        include_archive: bool,
+    ) -> Result<HistoryResponse> {
         let limit = limit.min(MAX_MCP_RESULTS);
         let path = normalize_request_path(path);
         self.ensure_in_scope(&path)?;
-        let entries = self.open_graph()?.get_history(&path, limit)?;
+        let entries = self
+            .open_graph()?
+            .get_history_with_archive(&path, limit, include_archive)?;
         let total = entries.len();
         let entries_json: Vec<serde_json::Value> = entries
             .into_iter()
@@ -1089,6 +1207,24 @@ impl OrganonMcpServer {
     }
 
     #[tool(
+        description = "Find files matching a route path and their one-hop file relationships. Returns match percentages for direct indexed-text matches only; no file contents."
+    )]
+    async fn query_route_files(
+        &self,
+        Parameters(req): Parameters<QueryRouteFilesRequest>,
+    ) -> Result<Json<QueryRouteFilesResponse>, String> {
+        self.service
+            .query_route_files(
+                &req.query,
+                req.path_prefix.as_deref(),
+                req.limit.unwrap_or(20).min(100),
+                req.offset.unwrap_or(0),
+            )
+            .map(Json)
+            .map_err(|error| error.to_string())
+    }
+
+    #[tool(
         description = "Search files by semantic meaning. Returns structured results. Pass explain=true for per-hit score breakdown."
     )]
     async fn search_files(
@@ -1199,14 +1335,18 @@ impl OrganonMcpServer {
     }
 
     #[tool(
-        description = "Return lifecycle and change history for a file. Events: created, modified, lifecycle, renamed, deleted."
+        description = "Return lifecycle and change history for a file, including available text before/after regions and observation gaps. Set include_archive=true to retrieve older archived entries (marked archived: true). Events: created, modified, lifecycle, renamed, deleted."
     )]
     async fn get_history(
         &self,
         Parameters(req): Parameters<GetHistoryRequest>,
     ) -> Result<Json<HistoryResponse>, String> {
         self.service
-            .get_history(&req.path, req.limit.unwrap_or(20))
+            .get_history_with_archive(
+                &req.path,
+                req.limit.unwrap_or(20),
+                req.include_archive.unwrap_or(false),
+            )
             .map(Json)
             .map_err(|e| e.to_string())
     }
@@ -1625,12 +1765,107 @@ mod tests {
     }
 
     #[test]
+    fn query_route_files_separates_direct_and_connected_with_scope() {
+        let (service, graph, _file) = temp_scoped_service("/tmp/work");
+        for path in [
+            "/tmp/work/route.py",
+            "/tmp/work/model.py",
+            "/tmp/other/private.py",
+        ] {
+            graph.upsert(&test_entity(path)).unwrap();
+        }
+        graph
+            .update_fts("/tmp/work/route.py", "route.py", "@app.get('/x/sds/sd')")
+            .unwrap();
+        graph
+            .upsert_relation("/tmp/work/route.py", "/tmp/work/model.py", "imports")
+            .unwrap();
+        graph
+            .upsert_relation("/tmp/work/route.py", "/tmp/other/private.py", "imports")
+            .unwrap();
+
+        let response = service.query_route_files("/x/sds/sd", None, 10, 0).unwrap();
+        assert_eq!(response.items.len(), 2);
+        assert_eq!(response.items[0].path, "/tmp/work/route.py");
+        assert_eq!(response.items[0].match_percent, Some(100));
+        assert_eq!(response.items[1].path, "/tmp/work/model.py");
+        assert_eq!(response.items[1].match_percent, None);
+        assert!(response.items[1].reason.contains("imports"));
+        assert!(!response.has_more);
+        let page = service.query_route_files("/x/sds/sd", None, 1, 1).unwrap();
+        assert_eq!(page.items[0].path, "/tmp/work/model.py");
+        assert!(service
+            .query_route_files("/x/sds/sd", Some("/tmp/other"), 10, 0)
+            .is_err());
+    }
+
+    #[test]
+    fn query_route_files_returns_composed_route_and_prefix_files() {
+        let (service, _graph, file) = temp_scoped_service("/tmp/work");
+        let connection = rusqlite::Connection::open(file.path()).unwrap();
+        connection
+            .execute(
+                "INSERT INTO indexed_routes(route, handler_path, provenance) VALUES (?1, ?2, ?3)",
+                rusqlite::params![
+                    "/api/users/login",
+                    "/tmp/work/auth.py",
+                    r#"["/tmp/work/auth.py","/tmp/work/api.py","/tmp/work/settings.py"]"#
+                ],
+            )
+            .unwrap();
+
+        let response = service
+            .query_route_files("/api/users/login", None, 10, 0)
+            .unwrap();
+        assert_eq!(response.items.len(), 3);
+        assert_eq!(response.items[0].path, "/tmp/work/auth.py");
+        assert_eq!(response.items[0].match_percent, Some(100));
+        assert_eq!(response.items[1].kind, "connected");
+        assert_eq!(response.items[1].match_percent, None);
+        assert!(response.items[1].reason.contains("prefix"));
+    }
+
+    #[test]
+    fn query_route_files_empty_index_does_not_claim_complete_search() {
+        let (service, _graph, _file) = temp_service();
+        let response = service.query_route_files("/x/sds/sd", None, 20, 0).unwrap();
+        assert!(response.items.is_empty());
+        assert!(!response.has_more);
+        assert!(response.coverage_note.contains("indexed text"));
+    }
+
+    #[test]
     fn get_entity_returns_row() {
         let (svc, graph, _file) = temp_service();
         graph.upsert(&test_entity("/tmp/main.rs")).unwrap();
 
         let entity = svc.get_entity("/tmp/main.rs").unwrap().unwrap();
         assert_eq!(entity.path, "/tmp/main.rs");
+    }
+
+    #[test]
+    fn get_history_exposes_text_change() {
+        let (service, graph, _db) = temp_service();
+        let file = NamedTempFile::new().unwrap();
+        let path = std::fs::canonicalize(file.path()).unwrap();
+        std::fs::write(&path, "old\n").unwrap();
+        graph
+            .upsert(&Entity::from_path(path.to_str().unwrap()).unwrap())
+            .unwrap();
+        std::fs::write(&path, "new\n").unwrap();
+        graph
+            .upsert(&Entity::from_path(path.to_str().unwrap()).unwrap())
+            .unwrap();
+
+        let response = service.get_history(path.to_str().unwrap(), 10).unwrap();
+        let changed = response
+            .entries
+            .iter()
+            .find(|entry| entry["event"] == "modified")
+            .unwrap();
+        assert_eq!(changed["text_change"]["before"], "old\n");
+        assert_eq!(changed["text_change"]["after"], "new\n");
+        assert_eq!(changed["observation_gap"], false);
     }
 
     #[test]
@@ -1812,6 +2047,7 @@ mod tests {
 
         for name in [
             "search_files",
+            "query_route_files",
             "build_context",
             "get_entity",
             "list_by_lifecycle",

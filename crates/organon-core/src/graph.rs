@@ -4,8 +4,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::Result;
 use log::{debug, info, warn};
-use rusqlite::{params, params_from_iter, types::Value, Connection};
+use rusqlite::{params, params_from_iter, types::Value, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::entity::{Entity, LifecycleState, PSEUDO_HASH_PREFIX};
 
@@ -28,7 +29,30 @@ pub struct HistoryEntry {
     pub size_bytes: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content_hash: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text_change: Option<TextChange>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail_status: Option<String>,
+    pub observation_gap: bool,
+    /// True when this entry was retrieved from cold history storage.
+    #[serde(default)]
+    pub archived: bool,
     pub recorded_at: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HistoryStorageStats {
+    pub active_entries: u64,
+    pub archive_entries: u64,
+    pub active_bytes: u64,
+    pub archive_bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TextChange {
+    pub start_line: usize,
+    pub before: String,
+    pub after: String,
 }
 
 pub struct Graph {
@@ -56,6 +80,20 @@ pub struct ImpactEntry {
     pub kind: String,
     /// BFS depth from the queried file (1 = direct importer).
     pub depth: u8,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RouteMatch {
+    pub path: String,
+    pub match_percent: u8,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct IndexedRoute {
+    pub route: String,
+    pub handler_path: String,
+    pub provenance: Vec<String>,
 }
 
 /// A group of files that share the same `content_hash`.
@@ -133,6 +171,14 @@ impl Graph {
                 content
             );
 
+            CREATE TABLE IF NOT EXISTS indexed_routes (
+                route TEXT NOT NULL,
+                handler_path TEXT NOT NULL,
+                provenance TEXT NOT NULL,
+                PRIMARY KEY (route, handler_path)
+            );
+            CREATE INDEX IF NOT EXISTS idx_indexed_routes_route ON indexed_routes(route);
+
             CREATE TABLE IF NOT EXISTS entity_history (
                 id           INTEGER PRIMARY KEY AUTOINCREMENT,
                 entity_id    TEXT    NOT NULL,
@@ -143,14 +189,50 @@ impl Graph {
                 old_path     TEXT,
                 size_bytes   INTEGER,
                 content_hash TEXT,
-                recorded_at  INTEGER NOT NULL
+                recorded_at  INTEGER NOT NULL,
+                text_change TEXT,
+                detail_status TEXT,
+                observation_gap INTEGER NOT NULL DEFAULT 0,
+                before_text TEXT
             );
             CREATE INDEX IF NOT EXISTS idx_history_path     ON entity_history(path);
             CREATE INDEX IF NOT EXISTS idx_history_entity   ON entity_history(entity_id);
             CREATE INDEX IF NOT EXISTS idx_history_recorded ON entity_history(recorded_at DESC);
+
+            CREATE TABLE IF NOT EXISTS entity_history_archive (
+                id INTEGER PRIMARY KEY,
+                entity_id TEXT NOT NULL,
+                path TEXT NOT NULL,
+                event TEXT NOT NULL,
+                old_lifecycle TEXT,
+                new_lifecycle TEXT,
+                old_path TEXT,
+                size_bytes INTEGER,
+                content_hash TEXT,
+                recorded_at INTEGER NOT NULL,
+                text_change TEXT,
+                detail_status TEXT,
+                observation_gap INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE INDEX IF NOT EXISTS idx_history_archive_path ON entity_history_archive(path, recorded_at DESC);
+
+            CREATE TABLE IF NOT EXISTS file_snapshots (
+                entity_id TEXT PRIMARY KEY,
+                content_hash TEXT NOT NULL,
+                content TEXT NOT NULL
+            );
         ",
         )?;
         ensure_column(&self.conn, "entities", "git_author", "TEXT")?;
+        ensure_column(&self.conn, "entity_history", "text_change", "TEXT")?;
+        ensure_column(&self.conn, "entity_history", "detail_status", "TEXT")?;
+        ensure_column(
+            &self.conn,
+            "entity_history",
+            "observation_gap",
+            "INTEGER NOT NULL DEFAULT 0",
+        )?;
+        ensure_column(&self.conn, "entity_history", "before_text", "TEXT")?;
         debug!("schema migration ok");
         Ok(())
     }
@@ -168,8 +250,9 @@ impl Graph {
         self.conn.execute(
             "INSERT INTO entity_history
                 (entity_id, path, event, old_lifecycle, new_lifecycle,
-                 old_path, size_bytes, content_hash, recorded_at)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+                 old_path, size_bytes, content_hash, recorded_at,
+                 text_change, detail_status, observation_gap)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
             params![
                 entry.entity_id,
                 entry.path,
@@ -180,6 +263,13 @@ impl Graph {
                 entry.size_bytes,
                 entry.content_hash,
                 entry.recorded_at,
+                entry
+                    .text_change
+                    .as_ref()
+                    .map(serde_json::to_string)
+                    .transpose()?,
+                entry.detail_status,
+                entry.observation_gap,
             ],
         )?;
         debug!(
@@ -191,15 +281,24 @@ impl Graph {
 
     /// Return history entries for a given path, newest first.
     pub fn get_history(&self, path: &str, limit: usize) -> Result<Vec<HistoryEntry>> {
+        self.get_history_with_archive(path, limit, false)
+    }
+
+    /// Return recent history, optionally including the local cold archive.
+    pub fn get_history_with_archive(
+        &self,
+        path: &str,
+        limit: usize,
+        include_archive: bool,
+    ) -> Result<Vec<HistoryEntry>> {
         let limit = if limit == 0 { 50 } else { limit };
-        let mut stmt = self.conn.prepare(
-            "SELECT id, entity_id, path, event, old_lifecycle, new_lifecycle,
-                    old_path, size_bytes, content_hash, recorded_at
-             FROM entity_history
-             WHERE path = ?1
-             ORDER BY recorded_at DESC, id DESC
-             LIMIT ?2",
-        )?;
+        let cols = "id, entity_id, path, event, old_lifecycle, new_lifecycle, old_path, size_bytes, content_hash, recorded_at, text_change, detail_status, observation_gap";
+        let query = if include_archive {
+            format!("SELECT {cols}, 0 AS archived FROM entity_history WHERE path = ?1 UNION ALL SELECT {cols}, 1 AS archived FROM entity_history_archive WHERE path = ?1 ORDER BY recorded_at DESC, id DESC LIMIT ?2")
+        } else {
+            format!("SELECT {cols}, 0 AS archived FROM entity_history WHERE path = ?1 ORDER BY recorded_at DESC, id DESC LIMIT ?2")
+        };
+        let mut stmt = self.conn.prepare(&query)?;
         let rows = stmt.query_map(params![path, limit as i64], |row| {
             Ok(HistoryEntry {
                 id: row.get(0)?,
@@ -212,15 +311,67 @@ impl Graph {
                 size_bytes: row.get(7)?,
                 content_hash: row.get(8)?,
                 recorded_at: row.get(9)?,
+                text_change: row
+                    .get::<_, Option<String>>(10)?
+                    .and_then(|value| serde_json::from_str(&value).ok()),
+                detail_status: row.get(11)?,
+                observation_gap: row.get(12)?,
+                archived: row.get(13)?,
             })
         })?;
         let entries: rusqlite::Result<Vec<_>> = rows.collect();
         Ok(entries?)
     }
 
+    /// Move history older than `cutoff` into cold storage in one transaction.
+    pub fn archive_history_before(&self, cutoff: i64) -> Result<usize> {
+        let tx = self.conn.unchecked_transaction()?;
+        let moved = tx.execute(
+            "INSERT INTO entity_history_archive
+             (id, entity_id, path, event, old_lifecycle, new_lifecycle, old_path,
+              size_bytes, content_hash, recorded_at, text_change, detail_status, observation_gap)
+             SELECT id, entity_id, path, event, old_lifecycle, new_lifecycle, old_path,
+                    size_bytes, content_hash, recorded_at, text_change, detail_status, observation_gap
+             FROM entity_history WHERE recorded_at < ?1",
+            [cutoff],
+        )?;
+        tx.execute(
+            "DELETE FROM entity_history WHERE recorded_at < ?1",
+            [cutoff],
+        )?;
+        tx.commit()?;
+        Ok(moved)
+    }
+
+    /// Approximate history payload size, separately for active and cold rows.
+    pub fn history_storage_stats(&self) -> Result<HistoryStorageStats> {
+        fn size(conn: &Connection, table: &str) -> Result<(u64, u64)> {
+            let query = format!("SELECT COUNT(*), COALESCE(SUM(128 + LENGTH(path) + LENGTH(entity_id) + LENGTH(event) + COALESCE(LENGTH(text_change), 0) + COALESCE(LENGTH(content_hash), 0)), 0) FROM {table}");
+            let (count, bytes): (i64, i64) =
+                conn.query_row(&query, [], |row| Ok((row.get(0)?, row.get(1)?)))?;
+            Ok((count as u64, bytes as u64))
+        }
+        let (active_entries, active_bytes) = size(&self.conn, "entity_history")?;
+        let (archive_entries, archive_bytes) = size(&self.conn, "entity_history_archive")?;
+        Ok(HistoryStorageStats {
+            active_entries,
+            archive_entries,
+            active_bytes,
+            archive_bytes,
+        })
+    }
+
     // ── entities CRUD ─────────────────────────────────────────────────────────
 
     pub fn upsert(&self, entity: &Entity) -> Result<()> {
+        self.upsert_with_origin(entity, false)
+    }
+
+    pub fn upsert_scanned(&self, entity: &Entity) -> Result<()> {
+        self.upsert_with_origin(entity, true)
+    }
+
+    fn upsert_with_origin(&self, entity: &Entity, scanned: bool) -> Result<()> {
         debug!("upsert: {} [{}]", entity.path, entity.lifecycle.as_str());
 
         // Read prior state to derive history events (one indexed read per upsert).
@@ -271,8 +422,13 @@ impl Graph {
                     old_path: None,
                     size_bytes: Some(entity.size_bytes as i64),
                     content_hash: entity.content_hash.clone(),
+                    text_change: None,
+                    detail_status: None,
+                    observation_gap: false,
+                    archived: false,
                     recorded_at: now,
                 })?;
+                self.store_snapshot(&entity.id, entity, capture_text(entity))?;
             }
             Some(prev) => {
                 let lifecycle_changed = prev.lifecycle.as_str() != entity.lifecycle.as_str();
@@ -290,26 +446,135 @@ impl Graph {
                         old_path: None,
                         size_bytes: Some(entity.size_bytes as i64),
                         content_hash: entity.content_hash.clone(),
+                        text_change: None,
+                        detail_status: None,
+                        observation_gap: false,
+                        archived: false,
                         recorded_at: now,
                     })?;
                 }
                 if hash_changed {
-                    self.record_history(&HistoryEntry {
-                        id: 0,
-                        entity_id: prev.id.clone(),
-                        path: entity.path.clone(),
-                        event: "modified".into(),
-                        old_lifecycle: None,
-                        new_lifecycle: Some(entity.lifecycle.as_str().into()),
-                        old_path: None,
-                        size_bytes: Some(entity.size_bytes as i64),
-                        content_hash: entity.content_hash.clone(),
-                        recorded_at: now,
-                    })?;
+                    self.record_content_change(&prev.id, entity, now, scanned)?;
+                } else if scanned {
+                    let has_snapshot: bool = self.conn.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM file_snapshots WHERE entity_id = ?1)",
+                        [&prev.id],
+                        |row| row.get(0),
+                    )?;
+                    if !has_snapshot {
+                        self.store_snapshot(&prev.id, entity, capture_text(entity))?;
+                    }
                 }
             }
         }
 
+        Ok(())
+    }
+
+    fn store_snapshot(
+        &self,
+        entity_id: &str,
+        entity: &Entity,
+        content: Option<String>,
+    ) -> Result<()> {
+        if let (Some(content), Some(hash)) = (content, entity.content_hash.as_deref()) {
+            self.conn.execute(
+                "INSERT INTO file_snapshots(entity_id, content_hash, content) VALUES (?1, ?2, ?3)
+                 ON CONFLICT(entity_id) DO UPDATE SET content_hash = excluded.content_hash, content = excluded.content",
+                params![entity_id, hash, content],
+            )?;
+        } else {
+            self.conn.execute(
+                "DELETE FROM file_snapshots WHERE entity_id = ?1",
+                [entity_id],
+            )?;
+        }
+        Ok(())
+    }
+
+    fn record_content_change(
+        &self,
+        entity_id: &str,
+        entity: &Entity,
+        now: i64,
+        scanned: bool,
+    ) -> Result<()> {
+        let previous: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT content FROM file_snapshots WHERE entity_id = ?1",
+                [entity_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let current = capture_text(entity);
+        let recent: Option<(i64, i64, Option<String>, bool)> = self
+            .conn
+            .query_row(
+                "SELECT id, recorded_at, before_text, observation_gap FROM entity_history
+             WHERE entity_id = ?1 AND event = 'modified' ORDER BY id DESC LIMIT 1",
+                [entity_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .optional()?;
+        let grouped = recent
+            .as_ref()
+            .filter(|(_, last_at, _, _)| now >= *last_at && now - *last_at <= 5);
+        let baseline = if let Some((_, _, before, _)) = grouped {
+            before.clone()
+        } else {
+            previous.clone()
+        };
+        let text_change = baseline
+            .as_deref()
+            .zip(current.as_deref())
+            .map(|(before, after)| text_change(before, after));
+        let detail_status = if text_change.is_some() {
+            "text"
+        } else {
+            "binary_or_unavailable"
+        };
+        let observation_gap = scanned || grouped.is_some_and(|(_, _, _, gap)| *gap);
+        if let Some((id, _, _, _)) = grouped {
+            self.conn.execute(
+                "UPDATE entity_history SET size_bytes = ?2, content_hash = ?3, recorded_at = ?4,
+                 text_change = ?5, detail_status = ?6, observation_gap = ?7 WHERE id = ?1",
+                params![
+                    id,
+                    entity.size_bytes as i64,
+                    entity.content_hash,
+                    now,
+                    text_change
+                        .as_ref()
+                        .map(serde_json::to_string)
+                        .transpose()?,
+                    detail_status,
+                    observation_gap
+                ],
+            )?;
+        } else {
+            self.record_history(&HistoryEntry {
+                id: 0,
+                entity_id: entity_id.to_string(),
+                path: entity.path.clone(),
+                event: "modified".into(),
+                old_lifecycle: None,
+                new_lifecycle: Some(entity.lifecycle.as_str().into()),
+                old_path: None,
+                size_bytes: Some(entity.size_bytes as i64),
+                content_hash: entity.content_hash.clone(),
+                text_change,
+                detail_status: Some(detail_status.to_string()),
+                observation_gap,
+                archived: false,
+                recorded_at: now,
+            })?;
+            self.conn.execute(
+                "UPDATE entity_history SET before_text = ?1 WHERE id = last_insert_rowid()",
+                [previous],
+            )?;
+        }
+        self.store_snapshot(entity_id, entity, current)?;
         Ok(())
     }
 
@@ -343,6 +608,10 @@ impl Graph {
         if n > 0 {
             info!("deleted entity: {path}");
             if let Some(prev) = prior {
+                self.conn.execute(
+                    "DELETE FROM file_snapshots WHERE entity_id = ?1",
+                    [&prev.id],
+                )?;
                 self.record_history(&HistoryEntry {
                     id: 0,
                     entity_id: prev.id,
@@ -353,6 +622,10 @@ impl Graph {
                     old_path: None,
                     size_bytes: Some(prev.size_bytes as i64),
                     content_hash: prev.content_hash,
+                    text_change: None,
+                    detail_status: None,
+                    observation_gap: false,
+                    archived: false,
                     recorded_at: Self::now_ts(),
                 })?;
             }
@@ -470,7 +743,7 @@ impl Graph {
         }
 
         // ── handle conflict at new_path ───────────────────────────────────────
-        let conflict_resolved = if self.get_by_path(new_path)?.is_some() {
+        let conflict_resolved = if let Some(conflict) = self.get_by_path(new_path)? {
             info!(
                 "rename_entity: new_path exists (overwritten by OS rename), removing: {new_path}"
             );
@@ -480,6 +753,10 @@ impl Graph {
             )?;
             self.conn
                 .execute("DELETE FROM entities WHERE path = ?1", params![new_path])?;
+            self.conn.execute(
+                "DELETE FROM file_snapshots WHERE entity_id = ?1",
+                [&conflict.id],
+            )?;
             self.conn.execute(
                 "DELETE FROM entities_fts WHERE path = ?1",
                 params![new_path],
@@ -534,6 +811,10 @@ impl Graph {
             "UPDATE entity_history SET path = ?2 WHERE path = ?1",
             params![old_path, new_path],
         )?;
+        self.conn.execute(
+            "UPDATE entity_history_archive SET path = ?2 WHERE path = ?1",
+            params![old_path, new_path],
+        )?;
 
         // ── drop stale FTS entry (indexer re-adds under new path) ─────────────
         self.conn.execute(
@@ -555,6 +836,10 @@ impl Graph {
                 old_path: Some(old_path.to_string()),
                 size_bytes: Some(entity.size_bytes as i64),
                 content_hash: entity.content_hash,
+                text_change: None,
+                detail_status: None,
+                observation_gap: false,
+                archived: false,
                 recorded_at: Self::now_ts(),
             })?;
         }
@@ -696,6 +981,109 @@ impl Graph {
         Ok(results?)
     }
 
+    pub fn find_route_matches(
+        &self,
+        route: &str,
+        path_prefix: Option<&str>,
+        limit: usize,
+        offset: usize,
+    ) -> Result<Vec<RouteMatch>> {
+        let segments: Vec<String> = route
+            .split('/')
+            .filter(|segment| !segment.is_empty())
+            .map(str::to_lowercase)
+            .collect();
+        if segments.is_empty() {
+            return Ok(Vec::new());
+        }
+        let fts_query = segments
+            .iter()
+            .map(|segment| format!("\"{}\"", segment.replace('"', "\"\"")))
+            .collect::<Vec<_>>()
+            .join(" OR ");
+        let mut stmt = self.conn.prepare(
+            "SELECT path, content FROM entities_fts WHERE entities_fts MATCH ?1
+             UNION
+             SELECT path, content FROM entities_fts WHERE instr(lower(path), lower(?2)) > 0",
+        )?;
+        let rows = stmt.query_map(params![fts_query, route], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        let route_lower = route.to_lowercase();
+        let mut matches = Vec::new();
+        for row in rows {
+            let (path, content) = row?;
+            if let Some(prefix) = path_prefix {
+                if path != prefix
+                    && !path
+                        .strip_prefix(prefix)
+                        .is_some_and(|suffix| suffix.starts_with('/'))
+                {
+                    continue;
+                }
+            }
+            let searchable = format!("{}\n{}", path.to_lowercase(), content.to_lowercase());
+            let exact = contains_route_fragment(&searchable, &route_lower, true);
+            let mut matched = 0;
+            if !exact {
+                for start in 0..segments.len() {
+                    for end in start + 1..=segments.len() {
+                        let fragment = format!("/{}", segments[start..end].join("/"));
+                        if contains_route_fragment(&searchable, &fragment, false) {
+                            matched = matched.max(end - start);
+                        }
+                    }
+                }
+            }
+            if !exact && matched == 0 {
+                continue;
+            }
+            let percent = if exact {
+                100
+            } else {
+                ((matched * 100) / segments.len()).min(99) as u8
+            };
+            matches.push(RouteMatch {
+                path,
+                match_percent: percent,
+                reason: if exact {
+                    "exact route occurrence in indexed text or path".to_string()
+                } else {
+                    format!(
+                        "{matched}/{} contiguous route segments in indexed text or path",
+                        segments.len()
+                    )
+                },
+            });
+        }
+        matches.sort_by(|left, right| {
+            right
+                .match_percent
+                .cmp(&left.match_percent)
+                .then(left.path.cmp(&right.path))
+        });
+        Ok(matches.into_iter().skip(offset).take(limit).collect())
+    }
+
+    pub fn get_indexed_routes(&self, route: &str) -> Result<Vec<IndexedRoute>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT handler_path, provenance FROM indexed_routes WHERE route = ?1 ORDER BY handler_path",
+        )?;
+        let rows = stmt.query_map([route], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        let mut records = Vec::new();
+        for row in rows {
+            let (handler_path, provenance) = row?;
+            records.push(IndexedRoute {
+                route: route.to_string(),
+                handler_path,
+                provenance: serde_json::from_str(&provenance)?,
+            });
+        }
+        Ok(records)
+    }
+
     // ── impact analysis ───────────────────────────────────────────────────────
 
     /// BFS over reverse edges: who imports/references `path`, up to `depth` hops.
@@ -797,6 +1185,102 @@ impl Graph {
             .conn
             .query_row("SELECT COUNT(*) FROM relationships", [], |row| row.get(0))?;
         Ok(n as usize)
+    }
+}
+
+fn contains_route_fragment(text: &str, fragment: &str, exact: bool) -> bool {
+    text.match_indices(fragment).any(|(start, _)| {
+        let before = text[..start].chars().next_back();
+        let after = text[start + fragment.len()..].chars().next();
+        let left_boundary = before.is_none_or(|character| {
+            !character.is_alphanumeric() && character != '_' && character != '/'
+        });
+        let right_boundary = after.is_none_or(|character| {
+            !character.is_alphanumeric() && character != '_' && (!exact || character != '/')
+        });
+        left_boundary && right_boundary
+    })
+}
+
+fn capture_text(entity: &Entity) -> Option<String> {
+    if entity.size_bytes > 256 * 1024 || entity.content_hash.as_deref()?.starts_with("size:") {
+        return None;
+    }
+    let path = Path::new(&entity.path);
+    let name = path.file_name()?.to_string_lossy().to_lowercase();
+    let extension = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+    if [
+        "png", "jpg", "jpeg", "gif", "webp", "heic", "pdf", "zip", "gz", "tar", "7z", "mp3", "mp4",
+        "mov", "wav", "db", "sqlite", "exe", "dylib", "so", "woff", "woff2", "ttf",
+    ]
+    .contains(&extension.as_str())
+    {
+        return None;
+    }
+    if name == ".env"
+        || name.starts_with(".env.")
+        || name == ".netrc"
+        || name == ".htpasswd"
+        || name.starts_with("id_rsa")
+        || name.starts_with("id_ed25519")
+        || name.starts_with("id_ecdsa")
+        || name.contains("secret")
+        || name.contains("credential")
+        || [
+            "pem", "key", "p12", "pfx", "jks", "keystore", "asc", "gpg", "token",
+        ]
+        .iter()
+        .any(|extension| name.ends_with(&format!(".{extension}")))
+        || path.components().any(|component| {
+            [".ssh", ".aws", ".gnupg", "secrets"]
+                .contains(&component.as_os_str().to_str().unwrap_or(""))
+        })
+        || std::env::var("ORGANON_SENSITIVE_EXTRA")
+            .ok()
+            .is_some_and(|patterns| extra_sensitive_match(&name, &patterns))
+    {
+        return None;
+    }
+    let bytes = std::fs::read(path).ok()?;
+    if bytes.len() > 256 * 1024 || bytes.contains(&0) {
+        return None;
+    }
+    if hex::encode(Sha256::digest(&bytes)) != entity.content_hash.as_deref()? {
+        return None;
+    }
+    String::from_utf8(bytes).ok()
+}
+
+fn extra_sensitive_match(name: &str, patterns: &str) -> bool {
+    patterns.split(':').any(|pattern| {
+        globset::Glob::new(&pattern.trim().to_lowercase())
+            .ok()
+            .is_some_and(|glob| glob.compile_matcher().is_match(name))
+    })
+}
+
+fn text_change(before: &str, after: &str) -> TextChange {
+    let old_lines: Vec<&str> = before.split_inclusive('\n').collect();
+    let new_lines: Vec<&str> = after.split_inclusive('\n').collect();
+    let mut start = 0;
+    while start < old_lines.len() && start < new_lines.len() && old_lines[start] == new_lines[start]
+    {
+        start += 1;
+    }
+    let mut old_end = old_lines.len();
+    let mut new_end = new_lines.len();
+    while old_end > start && new_end > start && old_lines[old_end - 1] == new_lines[new_end - 1] {
+        old_end -= 1;
+        new_end -= 1;
+    }
+    TextChange {
+        start_line: start + 1,
+        before: old_lines[start..old_end].concat(),
+        after: new_lines[start..new_end].concat(),
     }
 }
 
@@ -931,6 +1415,13 @@ mod tests {
     use crate::entity::{Entity, LifecycleState};
     use tempfile::NamedTempFile;
 
+    #[test]
+    fn extra_sensitive_patterns_match_filename() {
+        assert!(extra_sensitive_match("vault.json", "vault.json:*.secret"));
+        assert!(extra_sensitive_match("token.secret", "vault.json:*.secret"));
+        assert!(!extra_sensitive_match("readme.md", "vault.json:*.secret"));
+    }
+
     fn tmp_graph() -> (Graph, NamedTempFile) {
         let f = NamedTempFile::new().unwrap();
         let g = Graph::open(f.path().to_str().unwrap()).unwrap();
@@ -952,6 +1443,40 @@ mod tests {
             summary: None,
             git_author: None,
         }
+    }
+
+    #[test]
+    fn route_matches_exact_partial_and_scope() {
+        let (graph, _file) = tmp_graph();
+        for (path, text) in [
+            ("/work/route.py", "@app.get('/x/sds/sd')"),
+            ("/work/partial.py", "@app.get('/x/sds')"),
+            ("/work/other.py", "@app.get('/x/sds/sd2')"),
+            ("/work/scattered.py", "x and sds and sd are unrelated words"),
+            ("/else/route.py", "@app.get('/x/sds/sd')"),
+        ] {
+            graph.update_fts(path, "route.py", text).unwrap();
+        }
+        let matches = graph
+            .find_route_matches("/x/sds/sd", Some("/work"), 10, 0)
+            .unwrap();
+        assert_eq!(matches[0].path, "/work/route.py");
+        assert_eq!(matches[0].match_percent, 100);
+        assert!(matches
+            .iter()
+            .any(|item| item.path == "/work/partial.py" && item.match_percent < 100));
+        assert!(matches.iter().all(|item| item.path != "/else/route.py"));
+        assert!(matches
+            .iter()
+            .all(|item| item.path != "/work/other.py" || item.match_percent < 100));
+        assert!(matches.iter().all(|item| item.path != "/work/scattered.py"));
+        assert_eq!(
+            graph
+                .find_route_matches("/x/sds/sd", Some("/work"), 1, 1)
+                .unwrap()
+                .len(),
+            1
+        );
     }
 
     // ── concurrency ──────────────────────────────────────────────────────────

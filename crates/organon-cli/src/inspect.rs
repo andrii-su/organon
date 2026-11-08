@@ -203,7 +203,7 @@ pub(crate) fn cmd_init(force: bool) -> Result<()> {
 }
 
 /// Print entity count and total size broken down by lifecycle state.
-pub(crate) fn cmd_stats(db_path: &Path) -> Result<()> {
+pub(crate) fn cmd_stats(db_path: &Path, config: &OrgConfig) -> Result<()> {
     let graph = open_graph(db_path)?;
     let all = graph.all()?;
 
@@ -221,6 +221,22 @@ pub(crate) fn cmd_stats(db_path: &Path) -> Result<()> {
     println!("by lifecycle:");
     for (state, count) in &counts {
         println!("  {state:10}  {count}");
+    }
+    let history = graph.history_storage_stats()?;
+    println!();
+    println!(
+        "history active:   {} entries (~{})",
+        history.active_entries,
+        human_bytes(history.active_bytes)
+    );
+    println!(
+        "history archive:  {} entries (~{})",
+        history.archive_entries,
+        human_bytes(history.archive_bytes)
+    );
+    let threshold = config.history.warn_at_mb.saturating_mul(1_048_576);
+    if threshold > 0 && (history.active_bytes >= threshold || history.archive_bytes >= threshold) {
+        eprintln!("warning: history storage exceeds {} MiB; review [history].archive_after_days and retention needs", config.history.warn_at_mb);
     }
     Ok(())
 }

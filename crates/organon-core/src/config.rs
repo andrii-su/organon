@@ -55,6 +55,24 @@ impl Default for WatchConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
+pub struct HistoryConfig {
+    /// Move entries older than this many days to the local cold table.
+    pub archive_after_days: u64,
+    /// Warn when active or archived history exceeds this many MiB.
+    pub warn_at_mb: u64,
+}
+
+impl Default for HistoryConfig {
+    fn default() -> Self {
+        Self {
+            archive_after_days: 90,
+            warn_at_mb: 100,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct SearchConfig {
     pub default_limit: usize,
     /// "vector" | "fts" | "hybrid"
@@ -114,6 +132,7 @@ impl Default for ServerConfig {
 pub struct OrgConfig {
     pub lifecycle: LifecycleConfig,
     pub watch: WatchConfig,
+    pub history: HistoryConfig,
     pub search: SearchConfig,
     pub indexer: IndexerConfig,
     pub server: ServerConfig,

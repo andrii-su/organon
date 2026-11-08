@@ -59,7 +59,7 @@ pub fn scan(
         }
 
         match Entity::from_path_with_options(&path_str, use_git_timestamps) {
-            Ok(entity) => match graph.lock_recover().upsert(&entity) {
+            Ok(entity) => match graph.lock_recover().upsert_scanned(&entity) {
                 Ok(_) => {
                     indexed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 }

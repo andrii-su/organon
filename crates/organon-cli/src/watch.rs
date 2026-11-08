@@ -12,8 +12,13 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use std::os::unix::process::CommandExt;
 
 use anyhow::{bail, Context, Result};
-use log::info;
-use organon_core::{config::OrgConfig, graph::Graph, ignore::IgnoreSet, scanner};
+use log::{info, warn};
+use organon_core::{
+    config::{HistoryConfig, OrgConfig},
+    graph::Graph,
+    ignore::IgnoreSet,
+    scanner,
+};
 
 use crate::format::format_ts;
 use crate::python;
@@ -119,9 +124,11 @@ pub(crate) fn cmd_watch(
     }
 
     scanner::refresh_lifecycle(Arc::clone(&graph), &config.lifecycle)?;
+    archive_history(Arc::clone(&graph), &config.history)?;
 
     let _refresh_handle =
         scanner::schedule_lifecycle_refresh(Arc::clone(&graph), 6, config.lifecycle.clone());
+    let _archive_handle = schedule_history_archive(Arc::clone(&graph), config.history.clone());
 
     let mut indexer_child = if !no_index {
         let envs = python_env(config);
@@ -159,9 +166,45 @@ pub(crate) fn cmd_watch(
     result
 }
 
+fn archive_history(graph: Arc<Mutex<Graph>>, config: &HistoryConfig) -> Result<()> {
+    let graph = graph
+        .lock()
+        .map_err(|_| anyhow::anyhow!("graph lock poisoned"))?;
+    if config.archive_after_days > 0 {
+        let age = config
+            .archive_after_days
+            .saturating_mul(86_400)
+            .min(i64::MAX as u64) as i64;
+        let cutoff = unix_now().saturating_sub(age);
+        let moved = graph.archive_history_before(cutoff)?;
+        if moved > 0 {
+            info!("archived {moved} old history entries");
+        }
+    }
+    let stats = graph.history_storage_stats()?;
+    let threshold = config.warn_at_mb.saturating_mul(1_048_576);
+    if threshold > 0 && (stats.active_bytes >= threshold || stats.archive_bytes >= threshold) {
+        warn!("history storage is large: active ~{} MiB ({} entries), archive ~{} MiB ({} entries); consider reviewing retention settings", stats.active_bytes / 1_048_576, stats.active_entries, stats.archive_bytes / 1_048_576, stats.archive_entries);
+    }
+    Ok(())
+}
+
+fn schedule_history_archive(
+    graph: Arc<Mutex<Graph>>,
+    config: HistoryConfig,
+) -> std::thread::JoinHandle<()> {
+    std::thread::spawn(move || loop {
+        std::thread::sleep(Duration::from_secs(6 * 3600));
+        if let Err(error) = archive_history(Arc::clone(&graph), &config) {
+            warn!("history archive refresh failed: {error}");
+        }
+    })
+}
+
 /// Dispatch daemon subcommands.
 pub(crate) fn cmd_daemon(action: DaemonCmd) -> Result<()> {
     match action {
+        DaemonCmd::Autostart { .. } => unreachable!("autostart is handled by main"),
         DaemonCmd::List => cmd_daemon_list(),
         DaemonCmd::Status { id } => cmd_daemon_status(id.as_deref()),
         DaemonCmd::Stop { id } => cmd_daemon_stop(&id),

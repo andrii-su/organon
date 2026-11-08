@@ -13,6 +13,7 @@ Usage:
 import argparse
 import importlib.metadata
 import logging
+import os
 import sqlite3
 import sys
 import time
@@ -30,6 +31,7 @@ from ai.embeddings.store import (
 from ai.extractor.extract import extract_text
 from ai.relations.extract import extract_relations
 from ai.relations.store import delete_relations_from, upsert_relations
+from ai.routes.fastapi import discover_routes, replace_route_index
 
 logger = logging.getLogger(__name__)
 
@@ -240,6 +242,7 @@ def run_once(
         logger.info("pruned %d vector row(s) and %d FTS row(s)", pruned_vectors, pruned_fts)
     if not entities:
         logger.info("no entities in graph")
+        _index_routes(db_path, active_paths, prefixes)
         return {"total": 0, "indexed": 0, "skipped": 0, "errors": 0, "sensitive_skipped": 0}
 
     logger.info("indexing %d entities from graph", len(entities))
@@ -316,6 +319,7 @@ def run_once(
         except Exception as e:
             logger.debug("relation extraction failed for %s: %s", path, e)
 
+    _index_routes(db_path, active_paths, prefixes)
     logger.info(
         "done: %d indexed, %d skipped, %d sensitive skipped, %d errors (total %d)",
         stats["indexed"],
@@ -325,6 +329,24 @@ def run_once(
         stats["total"],
     )
     return stats
+
+
+def _index_routes(db_path: Path, active_paths: set[str], prefixes: list[str]) -> None:
+    paths = sorted(
+        path
+        for path in active_paths
+        if path.endswith(".py") and not is_ignored(path) and not is_sensitive(path)
+    )
+    roots = prefixes or (
+        [os.path.commonpath([str(Path(path).parent) for path in paths])] if paths else []
+    )
+    if not roots:
+        replace_route_index(db_path, [], [])
+        return
+    for root in roots:
+        scoped_paths = [path for path in paths if _path_in_scope(path, [root])]
+        records = discover_routes(Path(root), scoped_paths)
+        replace_route_index(db_path, records, [root])
 
 
 def main() -> None:

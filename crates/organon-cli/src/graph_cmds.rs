@@ -49,13 +49,19 @@ pub(crate) fn cmd_graph(
 }
 
 /// Show lifecycle and content-change history for a file.
-pub(crate) fn cmd_history(path: &PathBuf, limit: usize, json: bool, db_path: &Path) -> Result<()> {
+pub(crate) fn cmd_history(
+    path: &PathBuf,
+    limit: usize,
+    json: bool,
+    archive: bool,
+    db_path: &Path,
+) -> Result<()> {
     let graph = open_graph(db_path)?;
     let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.clone());
     let path_str = canonical.to_string_lossy();
     log::debug!("history: {path_str} limit={limit}");
 
-    let entries = graph.get_history(&path_str, limit)?;
+    let entries = graph.get_history_with_archive(&path_str, limit, archive)?;
 
     if entries.is_empty() {
         println!("no history found for: {path_str}");
@@ -96,7 +102,8 @@ pub(crate) fn cmd_history(path: &PathBuf, limit: usize, json: bool, db_path: &Pa
             "deleted" => format!("was {}", e.old_lifecycle.as_deref().unwrap_or("?")),
             other => other.to_string(),
         };
-        println!("{ts:<20}  {:<12}  {detail}", e.event);
+        let source = if e.archived { " [archive]" } else { "" };
+        println!("{ts:<20}  {:<12}  {detail}{source}", e.event);
     }
     Ok(())
 }

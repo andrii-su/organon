@@ -10,6 +10,262 @@ fn temp_graph() -> (Graph, NamedTempFile) {
     (g, f)
 }
 
+#[test]
+fn archived_history_is_opt_in_and_survives_rename() {
+    let (graph, db) = temp_graph();
+    let dir = tempfile::tempdir().unwrap();
+    let old = dir.path().join("old.txt");
+    std::fs::write(&old, "before\n").unwrap();
+    let old = std::fs::canonicalize(&old).unwrap();
+    let new = old.parent().unwrap().join("new.txt");
+    graph
+        .upsert(&Entity::from_path(old.to_str().unwrap()).unwrap())
+        .unwrap();
+    std::fs::write(&old, "after\n").unwrap();
+    graph
+        .upsert(&Entity::from_path(old.to_str().unwrap()).unwrap())
+        .unwrap();
+
+    let conn = rusqlite::Connection::open(db.path()).unwrap();
+    conn.execute("UPDATE entity_history SET recorded_at = 1", [])
+        .unwrap();
+    assert_eq!(graph.archive_history_before(2).unwrap(), 2);
+    assert_eq!(graph.archive_history_before(2).unwrap(), 0);
+    assert!(graph
+        .get_history(old.to_str().unwrap(), 10)
+        .unwrap()
+        .is_empty());
+    let archived = graph
+        .get_history_with_archive(old.to_str().unwrap(), 10, true)
+        .unwrap();
+    assert_eq!(archived.len(), 2);
+    assert!(archived.iter().all(|entry| entry.archived));
+    assert_eq!(archived[0].text_change.as_ref().unwrap().before, "before\n");
+    let stats = graph.history_storage_stats().unwrap();
+    assert_eq!((stats.active_entries, stats.archive_entries), (0, 2));
+    assert!(stats.archive_bytes > 0);
+
+    std::fs::rename(&old, &new).unwrap();
+    graph
+        .rename_entity(old.to_str().unwrap(), new.to_str().unwrap())
+        .unwrap();
+    let history = graph
+        .get_history_with_archive(new.to_str().unwrap(), 10, true)
+        .unwrap();
+    assert_eq!(history.len(), 3);
+    assert_eq!(history.iter().filter(|entry| entry.archived).count(), 2);
+    assert!(graph
+        .get_history_with_archive(old.to_str().unwrap(), 10, true)
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
+fn text_history_groups_quick_edits_from_original_content() {
+    let (graph, _db) = temp_graph();
+    let file = NamedTempFile::new().unwrap();
+    let path = std::fs::canonicalize(file.path()).unwrap();
+    std::fs::write(file.path(), "first\nold\n").unwrap();
+    graph
+        .upsert(&Entity::from_path(path.to_str().unwrap()).unwrap())
+        .unwrap();
+    std::fs::write(file.path(), "first\nnew\n").unwrap();
+    graph
+        .upsert(&Entity::from_path(path.to_str().unwrap()).unwrap())
+        .unwrap();
+    std::fs::write(file.path(), "first\nfinal\n").unwrap();
+    graph
+        .upsert(&Entity::from_path(path.to_str().unwrap()).unwrap())
+        .unwrap();
+
+    let history = graph.get_history(path.to_str().unwrap(), 20).unwrap();
+    let changes: Vec<_> = history
+        .iter()
+        .filter(|entry| entry.event == "modified")
+        .collect();
+    assert_eq!(changes.len(), 1);
+    let detail = changes[0].text_change.as_ref().unwrap();
+    assert_eq!(detail.start_line, 2);
+    assert_eq!(detail.before, "old\n");
+    assert_eq!(detail.after, "final\n");
+    assert!(!changes[0].observation_gap);
+}
+
+#[test]
+fn scanned_change_marks_gap_and_binary_change_has_no_text() {
+    let (graph, _db) = temp_graph();
+    let file = NamedTempFile::new().unwrap();
+    let path = std::fs::canonicalize(file.path()).unwrap();
+    std::fs::write(file.path(), b"\0old").unwrap();
+    graph
+        .upsert_scanned(&Entity::from_path(path.to_str().unwrap()).unwrap())
+        .unwrap();
+    std::fs::write(file.path(), b"\0new").unwrap();
+    graph
+        .upsert_scanned(&Entity::from_path(path.to_str().unwrap()).unwrap())
+        .unwrap();
+
+    let history = graph.get_history(path.to_str().unwrap(), 20).unwrap();
+    let modified = history
+        .iter()
+        .find(|entry| entry.event == "modified")
+        .unwrap();
+    assert!(modified.text_change.is_none());
+    assert!(modified.observation_gap);
+    assert_eq!(
+        modified.detail_status.as_deref(),
+        Some("binary_or_unavailable")
+    );
+}
+
+#[test]
+fn text_snapshot_follows_rename() {
+    let (graph, _db) = temp_graph();
+    let directory = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(directory.path()).unwrap();
+    let old_path = root.join("old.txt");
+    let new_path = root.join("new.txt");
+    std::fs::write(&old_path, "before\n").unwrap();
+    graph
+        .upsert(&Entity::from_path(old_path.to_str().unwrap()).unwrap())
+        .unwrap();
+    std::fs::rename(&old_path, &new_path).unwrap();
+    graph
+        .rename_entity(old_path.to_str().unwrap(), new_path.to_str().unwrap())
+        .unwrap();
+    std::fs::write(&new_path, "after\n").unwrap();
+    graph
+        .upsert(&Entity::from_path(new_path.to_str().unwrap()).unwrap())
+        .unwrap();
+
+    let history = graph.get_history(new_path.to_str().unwrap(), 20).unwrap();
+    let modified = history
+        .iter()
+        .find(|entry| entry.event == "modified")
+        .unwrap();
+    let detail = modified.text_change.as_ref().unwrap();
+    assert_eq!(detail.before, "before\n");
+    assert_eq!(detail.after, "after\n");
+    assert!(history.iter().any(|entry| entry.event == "renamed"));
+}
+
+#[test]
+fn edit_after_grouping_window_starts_new_episode() {
+    let (graph, db) = temp_graph();
+    let file = NamedTempFile::new().unwrap();
+    let path = std::fs::canonicalize(file.path()).unwrap();
+    std::fs::write(&path, "one\n").unwrap();
+    graph
+        .upsert(&Entity::from_path(path.to_str().unwrap()).unwrap())
+        .unwrap();
+    std::fs::write(&path, "two\n").unwrap();
+    graph
+        .upsert(&Entity::from_path(path.to_str().unwrap()).unwrap())
+        .unwrap();
+    let connection = rusqlite::Connection::open(db.path()).unwrap();
+    connection
+        .execute(
+            "UPDATE entity_history SET recorded_at = recorded_at - 10 WHERE event = 'modified'",
+            [],
+        )
+        .unwrap();
+    std::fs::write(&path, "three\n").unwrap();
+    graph
+        .upsert(&Entity::from_path(path.to_str().unwrap()).unwrap())
+        .unwrap();
+
+    let history = graph.get_history(path.to_str().unwrap(), 20).unwrap();
+    let changes: Vec<_> = history
+        .iter()
+        .filter(|entry| entry.event == "modified")
+        .collect();
+    assert_eq!(changes.len(), 2);
+    assert_eq!(changes[0].text_change.as_ref().unwrap().before, "two\n");
+    assert_eq!(changes[0].text_change.as_ref().unwrap().after, "three\n");
+}
+
+#[test]
+fn secret_named_file_keeps_metadata_without_text() {
+    let (graph, _db) = temp_graph();
+    let directory = tempfile::tempdir().unwrap();
+    let path = std::fs::canonicalize(directory.path())
+        .unwrap()
+        .join(".env");
+    std::fs::write(&path, "SECRET=old\n").unwrap();
+    graph
+        .upsert(&Entity::from_path(path.to_str().unwrap()).unwrap())
+        .unwrap();
+    std::fs::write(&path, "SECRET=new\n").unwrap();
+    graph
+        .upsert(&Entity::from_path(path.to_str().unwrap()).unwrap())
+        .unwrap();
+
+    let history = graph.get_history(path.to_str().unwrap(), 20).unwrap();
+    let modified = history
+        .iter()
+        .find(|entry| entry.event == "modified")
+        .unwrap();
+    assert!(modified.text_change.is_none());
+    assert_eq!(
+        modified.detail_status.as_deref(),
+        Some("binary_or_unavailable")
+    );
+}
+
+#[test]
+fn binary_extension_does_not_capture_ascii_bytes() {
+    let (graph, _db) = temp_graph();
+    let directory = tempfile::tempdir().unwrap();
+    let path = std::fs::canonicalize(directory.path())
+        .unwrap()
+        .join("photo.png");
+    std::fs::write(&path, b"image-one").unwrap();
+    graph
+        .upsert(&Entity::from_path(path.to_str().unwrap()).unwrap())
+        .unwrap();
+    std::fs::write(&path, b"image-two").unwrap();
+    graph
+        .upsert(&Entity::from_path(path.to_str().unwrap()).unwrap())
+        .unwrap();
+
+    let history = graph.get_history(path.to_str().unwrap(), 20).unwrap();
+    let modified = history
+        .iter()
+        .find(|entry| entry.event == "modified")
+        .unwrap();
+    assert!(modified.text_change.is_none());
+}
+
+#[test]
+fn scan_backfills_missing_snapshot_before_first_edit() {
+    let (graph, db) = temp_graph();
+    let file = NamedTempFile::new().unwrap();
+    let path = std::fs::canonicalize(file.path()).unwrap();
+    std::fs::write(&path, "original\n").unwrap();
+    graph
+        .upsert(&Entity::from_path(path.to_str().unwrap()).unwrap())
+        .unwrap();
+    let connection = rusqlite::Connection::open(db.path()).unwrap();
+    connection
+        .execute("DELETE FROM file_snapshots", [])
+        .unwrap();
+
+    graph
+        .upsert_scanned(&Entity::from_path(path.to_str().unwrap()).unwrap())
+        .unwrap();
+    std::fs::write(&path, "changed\n").unwrap();
+    graph
+        .upsert(&Entity::from_path(path.to_str().unwrap()).unwrap())
+        .unwrap();
+
+    let history = graph.get_history(path.to_str().unwrap(), 20).unwrap();
+    let modified = history
+        .iter()
+        .find(|entry| entry.event == "modified")
+        .unwrap();
+    assert_eq!(modified.text_change.as_ref().unwrap().before, "original\n");
+}
+
 fn test_entity(path: &str) -> Entity {
     Entity {
         id: uuid::Uuid::new_v4().to_string(),
@@ -559,12 +815,18 @@ fn history_empty_for_unknown_path() {
 
 #[test]
 fn history_limit_respected() {
-    let (graph, _f) = temp_graph();
+    let (graph, db) = temp_graph();
     let mut entity = test_entity("/tmp/many_events.rs");
     entity.content_hash = Some("h0".to_string());
     graph.upsert(&entity).unwrap();
-    // Create 5 more modified events by changing hash each time
+    let connection = rusqlite::Connection::open(db.path()).unwrap();
     for i in 1..=5 {
+        connection
+            .execute(
+                "UPDATE entity_history SET recorded_at = recorded_at - 10 WHERE id = (SELECT MAX(id) FROM entity_history WHERE event = 'modified')",
+                [],
+            )
+            .unwrap();
         entity.content_hash = Some(format!("h{i}"));
         graph.upsert(&entity).unwrap();
     }
