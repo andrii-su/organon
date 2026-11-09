@@ -360,10 +360,12 @@ Defaults: `dormant_days=30`, `archive_days=90`, embed model `BAAI/bge-small-en-v
 To keep the watcher running across logins, set absolute directories in
 `[watch].roots` and run `organon daemon autostart install`. This installs a
 per-user launchd service on macOS or systemd user service on Linux. The watcher
+starts when that user logs in; it does not monitor files before login. The watcher
 rescans these roots after each start and marks any downtime change as an
 observation gap. `organon daemon autostart uninstall` removes the service.
 Install from a stable binary path; the service records the current executable
-path when installed.
+path when installed. Both platforms write watcher output to
+`~/.organon/daemon/watch-autostart.log` (or `$ORGANON_HOME/daemon/watch-autostart.log`).
 
 ```toml
 [watch]

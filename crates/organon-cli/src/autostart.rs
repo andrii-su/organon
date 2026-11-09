@@ -78,7 +78,6 @@ pub(crate) fn cmd_autostart(action: AutostartCmd, config: &OrgConfig, db: &Path)
             if let Some(parent) = service.parent() {
                 fs::create_dir_all(parent)?;
             }
-            #[cfg(target_os = "macos")]
             fs::create_dir_all(organon_home_dir(&home).join("daemon"))?;
             if service.exists() {
                 stop_service(&service)?;
@@ -141,7 +140,6 @@ fn service_path(_home: &Path) -> Result<PathBuf> {
     bail!("autostart supports macOS and Linux only")
 }
 
-#[cfg(target_os = "macos")]
 fn organon_home_dir(home: &Path) -> PathBuf {
     std::env::var_os("ORGANON_HOME")
         .map(|value| {
@@ -192,9 +190,10 @@ fn xml(value: &str) -> String {
 fn render_service(
     exe: &Path,
     db: &Path,
-    _home: &Path,
+    home: &Path,
     env: &[(&str, Option<String>)],
 ) -> Result<String> {
+    let log = organon_home_dir(home).join("daemon/watch-autostart.log");
     let mut vars = String::new();
     for (key, value) in env {
         if let Some(value) = value {
@@ -205,8 +204,9 @@ fn render_service(
         }
     }
     Ok(format!(
-        "[Unit]\nDescription=Organon filesystem watcher\n\n[Service]\nType=simple\nExecStart=\"{}\" --db \"{}\" watch --detect-renames\n{vars}Restart=always\nRestartSec=5\n\n[Install]\nWantedBy=default.target\n",
-        systemd_escape(&exe.to_string_lossy())?, systemd_escape(&db.to_string_lossy())?
+        "[Unit]\nDescription=Organon filesystem watcher\n\n[Service]\nType=simple\nExecStart=\"{}\" --db \"{}\" watch --detect-renames\n{vars}StandardOutput=append:{}\nStandardError=append:{}\nRestart=always\nRestartSec=5\n\n[Install]\nWantedBy=default.target\n",
+        systemd_escape(&exe.to_string_lossy())?, systemd_escape(&db.to_string_lossy())?,
+        systemd_escape(&log.to_string_lossy())?, systemd_escape(&log.to_string_lossy())?
     ))
 }
 
@@ -293,6 +293,7 @@ mod tests {
         assert!(body.contains("/tmp/db file"));
         assert!(body.contains("ORGANON_CONFIG"));
         assert!(body.contains("watch"));
+        assert!(body.contains("watch-autostart.log"));
         assert!(!body.contains("--daemon"));
     }
 
