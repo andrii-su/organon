@@ -40,6 +40,13 @@ pub struct HistoryEntry {
     pub recorded_at: i64,
 }
 
+#[derive(Debug, Clone)]
+pub struct TextMatch {
+    pub path: String,
+    pub match_percent: u8,
+    pub reason: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HistoryStorageStats {
     pub active_entries: u64,
@@ -198,6 +205,7 @@ impl Graph {
             CREATE INDEX IF NOT EXISTS idx_history_path     ON entity_history(path);
             CREATE INDEX IF NOT EXISTS idx_history_entity   ON entity_history(entity_id);
             CREATE INDEX IF NOT EXISTS idx_history_recorded ON entity_history(recorded_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_history_period ON entity_history(recorded_at DESC, event, path);
 
             CREATE TABLE IF NOT EXISTS entity_history_archive (
                 id INTEGER PRIMARY KEY,
@@ -215,6 +223,7 @@ impl Graph {
                 observation_gap INTEGER NOT NULL DEFAULT 0
             );
             CREATE INDEX IF NOT EXISTS idx_history_archive_path ON entity_history_archive(path, recorded_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_history_archive_period ON entity_history_archive(recorded_at DESC, event, path);
 
             CREATE TABLE IF NOT EXISTS file_snapshots (
                 entity_id TEXT PRIMARY KEY,
@@ -300,6 +309,77 @@ impl Graph {
         };
         let mut stmt = self.conn.prepare(&query)?;
         let rows = stmt.query_map(params![path, limit as i64], |row| {
+            Ok(HistoryEntry {
+                id: row.get(0)?,
+                entity_id: row.get(1)?,
+                path: row.get(2)?,
+                event: row.get(3)?,
+                old_lifecycle: row.get(4)?,
+                new_lifecycle: row.get(5)?,
+                old_path: row.get(6)?,
+                size_bytes: row.get(7)?,
+                content_hash: row.get(8)?,
+                recorded_at: row.get(9)?,
+                text_change: row
+                    .get::<_, Option<String>>(10)?
+                    .and_then(|value| serde_json::from_str(&value).ok()),
+                detail_status: row.get(11)?,
+                observation_gap: row.get(12)?,
+                archived: row.get(13)?,
+            })
+        })?;
+        let entries: rusqlite::Result<Vec<_>> = rows.collect();
+        Ok(entries?)
+    }
+
+    /// Query recorded events, including events for files no longer in `entities`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn find_history_events(
+        &self,
+        from: i64,
+        to_exclusive: i64,
+        path_prefix: Option<&str>,
+        event: Option<&str>,
+        include_archive: bool,
+        limit: usize,
+        offset: usize,
+    ) -> Result<Vec<HistoryEntry>> {
+        let cols = "id, entity_id, path, event, old_lifecycle, new_lifecycle, old_path, size_bytes, content_hash, recorded_at, text_change, detail_status, observation_gap";
+        let mut query = format!("WITH events AS (SELECT {cols}, 0 AS archived FROM entity_history");
+        if include_archive {
+            query.push_str(&format!(
+                " UNION ALL SELECT {cols}, 1 AS archived FROM entity_history_archive"
+            ));
+        }
+        query.push_str(") SELECT * FROM events WHERE recorded_at >= ?1 AND recorded_at < ?2");
+        let mut values = vec![Value::Integer(from), Value::Integer(to_exclusive)];
+        if let Some(prefix) = path_prefix {
+            if prefix == "/" {
+                query.push_str(" AND substr(path, 1, 1) = '/'");
+            } else {
+                query.push_str(&format!(
+                    " AND (path = ?{} OR substr(path, 1, length(?{}) + 1) = ?{} || '/')",
+                    values.len() + 1,
+                    values.len() + 1,
+                    values.len() + 1
+                ));
+                values.push(Value::Text(prefix.to_string()));
+            }
+        }
+        if let Some(event) = event {
+            let index = values.len() + 1;
+            query.push_str(&format!(" AND event = ?{index}"));
+            values.push(Value::Text(event.to_string()));
+        }
+        query.push_str(&format!(
+            " ORDER BY recorded_at DESC, id DESC, archived ASC LIMIT ?{} OFFSET ?{}",
+            values.len() + 1,
+            values.len() + 2
+        ));
+        values.push(Value::Integer(limit.saturating_add(1) as i64));
+        values.push(Value::Integer(offset as i64));
+        let mut stmt = self.conn.prepare(&query)?;
+        let rows = stmt.query_map(params_from_iter(values), |row| {
             Ok(HistoryEntry {
                 id: row.get(0)?,
                 entity_id: row.get(1)?,
@@ -1063,6 +1143,80 @@ impl Graph {
                 .then(left.path.cmp(&right.path))
         });
         Ok(matches.into_iter().skip(offset).take(limit).collect())
+    }
+
+    /// Find literal query-token coverage in indexed text or paths. This is not a relevance score.
+    pub fn find_text_matches(
+        &self,
+        query: &str,
+        path_prefix: Option<&str>,
+    ) -> Result<Vec<TextMatch>> {
+        let terms: BTreeSet<String> = query
+            .split(|ch: char| !ch.is_alphanumeric())
+            .filter(|term| !term.is_empty())
+            .map(str::to_lowercase)
+            .collect();
+        if terms.is_empty() {
+            return Ok(Vec::new());
+        }
+        let fts_query = terms
+            .iter()
+            .map(|term| format!("\"{term}\""))
+            .collect::<Vec<_>>()
+            .join(" OR ");
+        let mut sql = "SELECT path, content FROM entities_fts WHERE entities_fts MATCH ?1 UNION SELECT path, content FROM entities_fts WHERE ".to_string();
+        let mut values = vec![Value::Text(fts_query)];
+        for (index, term) in terms.iter().enumerate() {
+            if index > 0 {
+                sql.push_str(" OR ");
+            }
+            sql.push_str(&format!("instr(lower(path), ?{}) > 0", index + 2));
+            values.push(Value::Text(term.clone()));
+        }
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(params_from_iter(values), |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        let mut matches = Vec::new();
+        for row in rows {
+            let (path, content) = row?;
+            if path_prefix.is_some_and(|prefix| {
+                path != prefix
+                    && !(prefix == "/" && path.starts_with('/'))
+                    && !path.starts_with(&format!("{prefix}/"))
+            }) {
+                continue;
+            }
+            let path_lower = path.to_lowercase();
+            let content_lower = content.to_lowercase();
+            let found: Vec<&str> = terms
+                .iter()
+                .filter(|term| {
+                    path_lower.contains(term.as_str()) || content_lower.contains(term.as_str())
+                })
+                .map(String::as_str)
+                .collect();
+            if found.is_empty() {
+                continue;
+            }
+            let percent = (found.len() * 100 / terms.len()) as u8;
+            matches.push(TextMatch {
+                path,
+                match_percent: percent,
+                reason: format!(
+                    "{}/{} literal query terms in indexed text or path: {}",
+                    found.len(),
+                    terms.len(),
+                    found.join(", ")
+                ),
+            });
+        }
+        matches.sort_by(|a, b| {
+            b.match_percent
+                .cmp(&a.match_percent)
+                .then(a.path.cmp(&b.path))
+        });
+        Ok(matches)
     }
 
     pub fn get_indexed_routes(&self, route: &str) -> Result<Vec<IndexedRoute>> {
