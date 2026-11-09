@@ -24,9 +24,15 @@ pub const BUILT_IN_SEGMENTS: &[&str] = &[
     ".DS_Store",
     "dist",
     "build",
+    ".build",
+    ".swiftpm",
     ".next",
     ".nuxt",
 ];
+
+fn is_builtin_ignored(segment: &str) -> bool {
+    BUILT_IN_SEGMENTS.contains(&segment) || segment.ends_with(".egg-info")
+}
 
 pub struct IgnoreSet {
     extra_segments: Vec<String>,
@@ -71,7 +77,7 @@ impl IgnoreSet {
         // Layer 1: built-in segments
         if path.components().any(|c| {
             let s = c.as_os_str().to_string_lossy();
-            BUILT_IN_SEGMENTS.contains(&s.as_ref())
+            is_builtin_ignored(&s)
         }) {
             return true;
         }
@@ -102,6 +108,25 @@ impl IgnoreSet {
 pub fn is_ignored_default(path: &Path) -> bool {
     path.components().any(|c| {
         let s = c.as_os_str().to_string_lossy();
-        BUILT_IN_SEGMENTS.contains(&s.as_ref())
+        is_builtin_ignored(&s)
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ignores_swift_build_and_python_package_metadata() {
+        let rules = IgnoreSet::load(Path::new("/tmp/work"), &[]);
+        for path in [
+            "/tmp/work/HomelabKit/.build/debug/Model.d",
+            "/tmp/work/HomelabKit/.swiftpm/configuration/registries.json",
+            "/tmp/work/src/lacon.egg-info/PKG-INFO",
+        ] {
+            assert!(rules.is_ignored(Path::new(path)));
+            assert!(is_ignored_default(Path::new(path)));
+        }
+        assert!(!rules.is_ignored(Path::new("/tmp/work/src/models.py")));
+    }
 }

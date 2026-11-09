@@ -59,6 +59,26 @@ def test_discovers_router_imported_from_relative_package(tmp_path: Path):
     ]
 
 
+def test_discovers_absolute_import_when_index_scope_is_package_root(tmp_path: Path):
+    app = tmp_path / "app"
+    routes = app / "api" / "routes"
+    routes.mkdir(parents=True)
+    (app / "__init__.py").write_text("")
+    (routes / "__init__.py").write_text("")
+    (routes / "api.py").write_text(
+        "from app.api.routes import authentication\n"
+        "router.include_router(authentication.router, prefix='/users')\n"
+    )
+    handler = routes / "authentication.py"
+    handler.write_text("@router.post('/login')\ndef login(): pass\n")
+
+    records = discover_routes(app)
+
+    assert ("/users/login", str(handler.resolve())) in [
+        (record.route, record.handler_path) for record in records
+    ]
+
+
 def test_does_not_take_prefix_from_unrelated_object(tmp_path: Path):
     (tmp_path / "main.py").write_text(
         "import child\nrouter.include_router(child.router, prefix=other.api_prefix)\n"

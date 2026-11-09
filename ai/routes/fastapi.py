@@ -23,10 +23,14 @@ def _join(prefix: str, path: str) -> str:
 
 
 def _module_path(root: Path, module: str) -> Path | None:
-    target = root.joinpath(*module.split("."))
-    for candidate in (target.with_suffix(".py"), target / "__init__.py"):
-        if candidate.is_file():
-            return candidate.resolve()
+    parts = module.split(".")
+    candidates = [root.joinpath(*parts)]
+    if parts[0] == root.name and (root / "__init__.py").is_file():
+        candidates.insert(0, root.joinpath(*parts[1:]))
+    for target in candidates:
+        for candidate in (target.with_suffix(".py"), target / "__init__.py"):
+            if candidate.is_file():
+                return candidate.resolve()
     return None
 
 

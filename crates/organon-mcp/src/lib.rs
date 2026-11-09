@@ -493,11 +493,11 @@ impl McpService {
         }
         for item in direct.iter().filter(|item| item.match_percent == 100) {
             for (from, to, relation) in graph.get_relations(&item.path)? {
-                let (other, reason) = if to == item.path {
-                    (from, format!("{relation} {}", item.path))
-                } else {
-                    (to, format!("{} {relation} this file", item.path))
-                };
+                if to != item.path {
+                    continue;
+                }
+                let other = from;
+                let reason = format!("{relation} {}", item.path);
                 if allowed(&other) && seen.insert(other.clone()) {
                     candidates.push(RouteFileCandidate {
                         path: other,
@@ -2059,6 +2059,7 @@ mod tests {
         for path in [
             "/tmp/work/models.py",
             "/tmp/work/handler.py",
+            "/tmp/work/unrelated.py",
             "/tmp/work/billing.py",
             "/tmp/work/invoice/entry.py",
             "/tmp/other/secret.py",
@@ -2078,6 +2079,9 @@ mod tests {
             .upsert_relation("/tmp/work/handler.py", "/tmp/work/models.py", "imports")
             .unwrap();
         graph
+            .upsert_relation("/tmp/work/models.py", "/tmp/work/unrelated.py", "imports")
+            .unwrap();
+        graph
             .upsert_relation("/tmp/other/secret.py", "/tmp/work/models.py", "imports")
             .unwrap();
 
@@ -2095,6 +2099,12 @@ mod tests {
         assert_eq!(consumer.items[0].match_percent, None);
         assert!(consumer.items[0].reason.contains("imports"));
         assert!(!consumer.has_more);
+        assert!(!service
+            .query_files("Order", FileQueryKind::Model, None, 20, 0, false)
+            .unwrap()
+            .items
+            .iter()
+            .any(|item| item.path == "/tmp/work/unrelated.py"));
 
         let partial = service
             .query_files(
