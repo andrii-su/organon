@@ -1,6 +1,6 @@
 [project]
 name = "organon-ai"
-version = "1.4.0"
+version = "1.4.3"
 description = "Organon AI layer — extraction, embeddings, relations, and indexing"
 requires-python = ">=3.11"
 dependencies = [
