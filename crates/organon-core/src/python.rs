@@ -4,19 +4,24 @@
 //! `uv run --project <organon-root> python ...`, so the AI layer's own
 //! environment is used no matter where the binary is installed.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PythonInvocation {
     pub program: String,
     pub args: Vec<String>,
+    /// Working directory for the child; `None` inherits the caller's.
+    pub current_dir: Option<PathBuf>,
 }
 
 impl PythonInvocation {
     pub fn command(&self) -> Command {
         let mut cmd = Command::new(&self.program);
         cmd.args(&self.args);
+        if let Some(dir) = &self.current_dir {
+            cmd.current_dir(dir);
+        }
         cmd
     }
 
@@ -47,7 +52,48 @@ pub fn python_invocation(args: &[&str]) -> PythonInvocation {
     PythonInvocation {
         program: uv_bin(),
         args: full_args,
+        current_dir: None,
     }
+}
+
+/// Build `uv run --project <root> python <args...>` that runs *inside* `root`.
+///
+/// Running from the trusted root keeps `python -m` and uv project discovery
+/// from picking up an `ai/` package or uv config in the caller's workspace.
+pub fn python_invocation_in(root: &Path, args: &[&str]) -> PythonInvocation {
+    let mut full_args = vec![
+        "run".to_string(),
+        "--project".to_string(),
+        root.to_string_lossy().to_string(),
+        "python".to_string(),
+    ];
+    full_args.extend(args.iter().map(|arg| (*arg).to_string()));
+    PythonInvocation {
+        program: uv_bin(),
+        args: full_args,
+        current_dir: Some(root.to_path_buf()),
+    }
+}
+
+/// Like [`python_project_root`], but never looks at the current directory:
+/// only `ORGANON_PYTHON_PROJECT` or the running binary's own location.
+///
+/// Use this where the current directory is an arbitrary user workspace
+/// (the MCP server), so a workspace cannot supply the Python code that runs.
+pub fn trusted_python_project_root() -> Option<PathBuf> {
+    if let Ok(root) = std::env::var("ORGANON_PYTHON_PROJECT") {
+        return Some(PathBuf::from(root));
+    }
+    let exe = std::env::current_exe().ok()?;
+    let real = std::fs::canonicalize(&exe).unwrap_or(exe);
+    real.parent()?
+        .ancestors()
+        .find(|dir| is_python_project(dir))
+        .map(Path::to_path_buf)
+}
+
+fn is_python_project(dir: &Path) -> bool {
+    dir.join("pyproject.toml").exists() && dir.join("ai/indexer.py").exists()
 }
 
 /// Locate the Organon Python project (the directory holding `pyproject.toml`
@@ -73,7 +119,7 @@ pub fn python_project_root() -> Option<PathBuf> {
 
     for start in starts {
         for dir in start.ancestors() {
-            if dir.join("pyproject.toml").exists() && dir.join("ai/indexer.py").exists() {
+            if is_python_project(dir) {
                 return Some(dir.to_path_buf());
             }
         }
@@ -106,10 +152,29 @@ mod tests {
     }
 
     #[test]
+    fn invocation_in_root_pins_project_and_working_dir() {
+        let root = Path::new("/opt/organon");
+        let invocation = python_invocation_in(root, &["-m", "ai.bridge"]);
+        assert_eq!(
+            invocation.args,
+            [
+                "run",
+                "--project",
+                "/opt/organon",
+                "python",
+                "-m",
+                "ai.bridge"
+            ]
+        );
+        assert_eq!(invocation.current_dir.as_deref(), Some(root));
+    }
+
+    #[test]
     fn display_joins_program_and_args() {
         let invocation = PythonInvocation {
             program: "uv".to_string(),
             args: vec!["run".to_string(), "python".to_string()],
+            current_dir: None,
         };
         assert_eq!(invocation.display(), "uv run python");
     }

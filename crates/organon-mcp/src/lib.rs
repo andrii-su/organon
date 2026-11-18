@@ -1329,7 +1329,16 @@ impl McpService {
     /// Runs through `uv run --project <organon-root>`, like the CLI, so the
     /// bridge finds the `ai` package however the binary was installed.
     fn python_bridge(&self, args: &serde_json::Value) -> Result<String> {
-        let invocation = bridge_invocation();
+        // Resolve the AI layer only from ORGANON_PYTHON_PROJECT or the binary's
+        // own location, never from the workspace the server was started in.
+        let root = python::trusted_python_project_root().ok_or_else(|| {
+            anyhow::anyhow!(
+                "semantic search needs the Organon Python layer, but its project root \
+                 could not be resolved from the organon binary location.\n{}",
+                python::python_remediation()
+            )
+        })?;
+        let invocation = bridge_invocation(&root);
         debug!("python_bridge: {}", invocation.display());
         let run = |inv: &python::PythonInvocation| {
             let mut cmd = inv.command();
@@ -1343,15 +1352,13 @@ impl McpService {
             // uv is missing from this process's PATH (common when a GUI client
             // launches the server): fall back to the project's synced .venv.
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-                let fallback = python::python_project_root()
-                    .and_then(|root| venv_bridge_invocation(&root))
-                    .ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "could not start python bridge `{}`: {err}\n{}",
-                            invocation.display(),
-                            python::python_remediation()
-                        )
-                    })?;
+                let fallback = venv_bridge_invocation(&root).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "could not start python bridge `{}`: {err}\n{}",
+                        invocation.display(),
+                        python::python_remediation()
+                    )
+                })?;
                 debug!("python_bridge: uv not found, using {}", fallback.display());
                 run(&fallback).map_err(|err| {
                     anyhow::anyhow!(
@@ -1378,17 +1385,18 @@ impl McpService {
     }
 }
 
-/// `<root>/.venv/bin/python -m ai.bridge`, if that venv exists.
+fn bridge_invocation(root: &Path) -> python::PythonInvocation {
+    python::python_invocation_in(root, &["-m", "ai.bridge"])
+}
+
+/// `<root>/.venv/bin/python -m ai.bridge`, run inside `root`, if that venv exists.
 fn venv_bridge_invocation(root: &Path) -> Option<python::PythonInvocation> {
     let venv_python = root.join(".venv/bin/python");
     venv_python.exists().then(|| python::PythonInvocation {
         program: venv_python.to_string_lossy().to_string(),
         args: vec!["-m".to_string(), "ai.bridge".to_string()],
+        current_dir: Some(root.to_path_buf()),
     })
-}
-
-fn bridge_invocation() -> python::PythonInvocation {
-    python::python_invocation(&["-m", "ai.bridge"])
 }
 
 impl Default for McpService {
@@ -1962,18 +1970,26 @@ mod tests {
         let invocation = super::venv_bridge_invocation(dir.path()).unwrap();
         assert_eq!(invocation.program, bin.join("python").to_string_lossy());
         assert_eq!(invocation.args, ["-m", "ai.bridge"]);
+        assert_eq!(invocation.current_dir.as_deref(), Some(dir.path()));
     }
 
     #[test]
-    fn bridge_runs_through_uv_project_python() {
-        let invocation = super::bridge_invocation();
+    fn bridge_runs_through_uv_inside_project_root() {
+        let root = Path::new("/opt/organon");
+        let invocation = super::bridge_invocation(root);
         assert_eq!(invocation.program, organon_core::python::uv_bin());
-        assert_eq!(invocation.args.first().unwrap(), "run");
-        assert!(invocation.args.ends_with(&[
-            "python".to_string(),
-            "-m".to_string(),
-            "ai.bridge".to_string()
-        ]));
+        assert_eq!(
+            invocation.args,
+            [
+                "run",
+                "--project",
+                "/opt/organon",
+                "python",
+                "-m",
+                "ai.bridge"
+            ]
+        );
+        assert_eq!(invocation.current_dir.as_deref(), Some(root));
     }
 
     use organon_core::{
