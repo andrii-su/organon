@@ -4,6 +4,7 @@ pub mod git;
 pub mod graph;
 pub mod ignore;
 pub mod lifecycle;
+pub mod python;
 pub mod scanner;
 pub mod watcher;
 pub mod workspace;

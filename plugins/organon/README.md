@@ -17,8 +17,14 @@ The `organon` binary must be on your `PATH`. Build it from the repo root:
 cargo build --release   # then put target/release/organon on PATH, or run setup.sh
 ```
 
-For semantic vector search, also install the Python layer (`uv sync`). The graph,
-lifecycle, history, and impact tools work from the binary alone.
+For semantic vector search, also install the Python layer (`uv sync` in the
+Organon repo). The MCP server runs it with `uv run --project <organon-root>`; if
+the `organon` binary is not inside that repo (for example a release binary on
+`PATH`), export `ORGANON_PYTHON_PROJECT=/path/to/organon` in the shell that
+launches Claude Code. `uv` must be on that process's `PATH` (or set
+`ORGANON_UV=/path/to/uv`); without it the server falls back to the repo's
+synced `.venv`, then to `python3` (text extraction only). The graph, lifecycle, history, and impact tools work from
+the binary alone.
 
 ## What it registers
 
