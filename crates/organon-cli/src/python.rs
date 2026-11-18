@@ -1,80 +1,13 @@
 use std::io;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command};
+use std::process::Child;
 
 use anyhow::{bail, Result};
 use log::debug;
 
 const INDEXER_MODULE: &str = "ai.indexer";
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PythonInvocation {
-    pub program: String,
-    pub args: Vec<String>,
-}
-
-impl PythonInvocation {
-    fn command(&self) -> Command {
-        let mut cmd = Command::new(&self.program);
-        cmd.args(&self.args);
-        cmd
-    }
-
-    fn display(&self) -> String {
-        std::iter::once(self.program.as_str())
-            .chain(self.args.iter().map(String::as_str))
-            .collect::<Vec<_>>()
-            .join(" ")
-    }
-}
-
-/// Resolve the uv executable.
-///
-/// `ORGANON_UV` is mainly for tests and unusual installations. The default path
-/// is intentionally stable: every Python call from the CLI goes through uv.
-pub fn uv_bin() -> String {
-    std::env::var("ORGANON_UV").unwrap_or_else(|_| "uv".to_string())
-}
-
-pub fn python_invocation(args: &[&str]) -> PythonInvocation {
-    let mut full_args = vec!["run".to_string()];
-    if let Some(project_root) = python_project_root() {
-        full_args.push("--project".to_string());
-        full_args.push(project_root.to_string_lossy().to_string());
-    }
-    full_args.push("python".to_string());
-    full_args.extend(args.iter().map(|arg| (*arg).to_string()));
-    PythonInvocation {
-        program: uv_bin(),
-        args: full_args,
-    }
-}
-
-pub fn python_project_root() -> Option<PathBuf> {
-    if let Ok(root) = std::env::var("ORGANON_PYTHON_PROJECT") {
-        return Some(PathBuf::from(root));
-    }
-
-    let mut starts = Vec::new();
-    if let Ok(exe) = std::env::current_exe() {
-        let real = std::fs::canonicalize(&exe).unwrap_or(exe);
-        if let Some(parent) = real.parent() {
-            starts.push(parent.to_path_buf());
-        }
-    }
-    if let Ok(cwd) = std::env::current_dir() {
-        starts.push(cwd);
-    }
-
-    for start in starts {
-        for dir in start.ancestors() {
-            if dir.join("pyproject.toml").exists() && dir.join("ai/indexer.py").exists() {
-                return Some(dir.to_path_buf());
-            }
-        }
-    }
-    None
-}
+pub use organon_core::python::{python_invocation, python_remediation, PythonInvocation};
 
 pub fn indexer_invocation(
     db_path: &Path,
@@ -195,28 +128,9 @@ fn python_start_error(err: io::Error, command: &str) -> anyhow::Error {
     }
 }
 
-fn python_remediation() -> &'static str {
-    "Install uv, then run `uv sync --group dev` from the Organon repository. \
-     Override the uv executable with ORGANON_UV=/path/to/uv or the project root with \
-     ORGANON_PYTHON_PROJECT=/path/to/organon if needed."
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn python_invocation_uses_uv_run_python() {
-        let invocation = python_invocation(&["-m", "ai.indexer", "--health"]);
-        assert_eq!(invocation.program, "uv");
-        assert_eq!(invocation.args.first().unwrap(), "run");
-        assert!(invocation.args.ends_with(&[
-            "python".to_string(),
-            "-m".to_string(),
-            "ai.indexer".to_string(),
-            "--health".to_string()
-        ]));
-    }
 
     #[test]
     fn indexer_invocation_builds_single_stable_entrypoint() {

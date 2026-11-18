@@ -1,7 +1,6 @@
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::Arc;
 
 use anyhow::{bail, Result};
@@ -12,6 +11,7 @@ use organon_core::{
     config::OrgConfig,
     entity::Entity,
     graph::{entity_matches_filter, FindFilter, Graph},
+    python,
 };
 use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
@@ -1325,50 +1325,70 @@ impl McpService {
     /// Invoke the Python AI layer via the argument-safe bridge. The request is
     /// passed as JSON in ORGANON_BRIDGE_ARGS rather than interpolated into a
     /// `python -c` snippet, so user-controlled strings never reach Python source.
+    ///
+    /// Runs through `uv run --project <organon-root>`, like the CLI, so the
+    /// bridge finds the `ai` package however the binary was installed.
     fn python_bridge(&self, args: &serde_json::Value) -> Result<String> {
-        let mut cmd = Command::new(self.python_bin());
-        cmd.args(["-m", "ai.bridge"])
-            .env("ORGANON_VECTORS_DB", &self.config.indexer.vectors_path)
-            .env("ORGANON_EMBED_MODEL", &self.config.indexer.embed_model)
-            .env("ORGANON_BRIDGE_ARGS", args.to_string());
-        let out = cmd.output()?;
+        let invocation = bridge_invocation();
+        debug!("python_bridge: {}", invocation.display());
+        let run = |inv: &python::PythonInvocation| {
+            let mut cmd = inv.command();
+            cmd.env("ORGANON_VECTORS_DB", &self.config.indexer.vectors_path)
+                .env("ORGANON_EMBED_MODEL", &self.config.indexer.embed_model)
+                .env("ORGANON_BRIDGE_ARGS", args.to_string());
+            cmd.output()
+        };
+        let out = match run(&invocation) {
+            Ok(out) => out,
+            // uv is missing from this process's PATH (common when a GUI client
+            // launches the server): fall back to the project's synced .venv.
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                let fallback = python::python_project_root()
+                    .and_then(|root| venv_bridge_invocation(&root))
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "could not start python bridge `{}`: {err}\n{}",
+                            invocation.display(),
+                            python::python_remediation()
+                        )
+                    })?;
+                debug!("python_bridge: uv not found, using {}", fallback.display());
+                run(&fallback).map_err(|err| {
+                    anyhow::anyhow!(
+                        "could not start python bridge `{}`: {err}",
+                        fallback.display()
+                    )
+                })?
+            }
+            Err(err) => bail!(
+                "could not start python bridge `{}`: {err}",
+                invocation.display()
+            ),
+        };
         if !out.status.success() {
-            bail!(
-                "python error (exit {}):\n{}",
-                out.status,
-                String::from_utf8_lossy(&out.stderr)
-            );
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            let hint = if stderr.contains("No module named") {
+                format!("\n{}", python::python_remediation())
+            } else {
+                String::new()
+            };
+            bail!("python error (exit {}):\n{stderr}{hint}", out.status);
         }
         Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
     }
+}
 
-    fn python_bin(&self) -> PathBuf {
-        if let Ok(exe) = std::env::current_exe() {
-            let real = std::fs::canonicalize(&exe).unwrap_or(exe);
-            let mut dir = real.parent().map(|p| p.to_path_buf());
-            for _ in 0..4 {
-                if let Some(d) = dir {
-                    let candidate = d.join(".venv/bin/python");
-                    if candidate.exists() {
-                        debug!(
-                            "python: using .venv from binary dir: {}",
-                            candidate.display()
-                        );
-                        return candidate;
-                    }
-                    dir = d.parent().map(|p| p.to_path_buf());
-                } else {
-                    break;
-                }
-            }
-        }
+/// `<root>/.venv/bin/python -m ai.bridge`, if that venv exists.
+fn venv_bridge_invocation(root: &Path) -> Option<python::PythonInvocation> {
+    let venv_python = root.join(".venv/bin/python");
+    venv_python.exists().then(|| python::PythonInvocation {
+        program: venv_python.to_string_lossy().to_string(),
+        args: vec!["-m".to_string(), "ai.bridge".to_string()],
+    })
+}
 
-        let cwd_venv = PathBuf::from(".venv/bin/python");
-        if cwd_venv.exists() {
-            return cwd_venv;
-        }
-        PathBuf::from("python3")
-    }
+fn bridge_invocation() -> python::PythonInvocation {
+    python::python_invocation(&["-m", "ai.bridge"])
 }
 
 impl Default for McpService {
@@ -1930,6 +1950,31 @@ fn file_excerpt(path: &str, max_chars: usize) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use std::path::Path;
+
+    #[test]
+    fn venv_fallback_requires_synced_venv() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(super::venv_bridge_invocation(dir.path()).is_none());
+
+        let bin = dir.path().join(".venv/bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(bin.join("python"), "").unwrap();
+        let invocation = super::venv_bridge_invocation(dir.path()).unwrap();
+        assert_eq!(invocation.program, bin.join("python").to_string_lossy());
+        assert_eq!(invocation.args, ["-m", "ai.bridge"]);
+    }
+
+    #[test]
+    fn bridge_runs_through_uv_project_python() {
+        let invocation = super::bridge_invocation();
+        assert_eq!(invocation.program, organon_core::python::uv_bin());
+        assert_eq!(invocation.args.first().unwrap(), "run");
+        assert!(invocation.args.ends_with(&[
+            "python".to_string(),
+            "-m".to_string(),
+            "ai.bridge".to_string()
+        ]));
+    }
 
     use organon_core::{
         config::OrgConfig,

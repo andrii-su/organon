@@ -352,7 +352,7 @@ Config lives at `~/.organon/config.toml` (write defaults with `organon init`). K
 | `ORGANON_HOME` | Base dir for all state (db, vectors, config, queries) — full sandbox switch |
 | `ORGANON_DB` | Override the SQLite graph path |
 | `ORGANON_CONFIG` / `ORGANON_QUERIES` | Explicit overrides for config / saved queries |
-| `ORGANON_PYTHON_PROJECT` | Path to the organon repo if the CLI can't resolve it |
+| `ORGANON_PYTHON_PROJECT` | Path to the organon repo if the CLI or MCP server can't resolve it |
 | `ORGANON_UV` | Path to `uv` for non-standard installs |
 
 Defaults: `dormant_days=30`, `archive_days=90`, embed model `BAAI/bge-small-en-v1.5`, hybrid score `0.3 * fts + 0.7 * vector`.
@@ -398,7 +398,7 @@ uv run --group dev pytest
 uv run python -m ai.indexer --health
 ```
 
-The Rust CLI invokes Python via `uv run --project <organon-root> python -m ai.indexer`. If the repo root can't be resolved from the installed binary, set `ORGANON_PYTHON_PROJECT`.
+The Rust CLI and MCP server invoke Python via `uv run --project <organon-root> python -m ai.<module>`. If the repo root can't be resolved from the installed binary, set `ORGANON_PYTHON_PROJECT`.
 
 ## Principles
 
