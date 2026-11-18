@@ -1350,20 +1350,30 @@ impl McpService {
         let out = match run(&invocation) {
             Ok(out) => out,
             // uv is missing from this process's PATH (common when a GUI client
-            // launches the server): fall back to the project's synced .venv.
+            // launches the server): fall back to the project's synced .venv,
+            // then to a system python3. Both run inside the trusted root, so
+            // `-m ai.bridge` always resolves to Organon's own package.
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-                let fallback = venv_bridge_invocation(&root).ok_or_else(|| {
+                let mut started = None;
+                for fallback in fallback_bridge_invocations(&root) {
+                    match run(&fallback) {
+                        Ok(out) => {
+                            debug!("python_bridge: uv not found, used {}", fallback.display());
+                            started = Some(out);
+                            break;
+                        }
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                        Err(e) => bail!(
+                            "could not start python bridge `{}`: {e}",
+                            fallback.display()
+                        ),
+                    }
+                }
+                started.ok_or_else(|| {
                     anyhow::anyhow!(
                         "could not start python bridge `{}`: {err}\n{}",
                         invocation.display(),
                         python::python_remediation()
-                    )
-                })?;
-                debug!("python_bridge: uv not found, using {}", fallback.display());
-                run(&fallback).map_err(|err| {
-                    anyhow::anyhow!(
-                        "could not start python bridge `{}`: {err}",
-                        fallback.display()
                     )
                 })?
             }
@@ -1389,14 +1399,24 @@ fn bridge_invocation(root: &Path) -> python::PythonInvocation {
     python::python_invocation_in(root, &["-m", "ai.bridge"])
 }
 
-/// `<root>/.venv/bin/python -m ai.bridge`, run inside `root`, if that venv exists.
-fn venv_bridge_invocation(root: &Path) -> Option<python::PythonInvocation> {
+/// Bridge invocations to try when uv cannot be spawned, in order:
+/// `<root>/.venv/bin/python` (if synced), then `python3`. Both run inside
+/// `root`; the system interpreter covers stdlib-only ops such as text extraction.
+fn fallback_bridge_invocations(root: &Path) -> Vec<python::PythonInvocation> {
     let venv_python = root.join(".venv/bin/python");
-    venv_python.exists().then(|| python::PythonInvocation {
-        program: venv_python.to_string_lossy().to_string(),
-        args: vec!["-m".to_string(), "ai.bridge".to_string()],
-        current_dir: Some(root.to_path_buf()),
-    })
+    let mut programs = Vec::new();
+    if venv_python.exists() {
+        programs.push(venv_python.to_string_lossy().to_string());
+    }
+    programs.push("python3".to_string());
+    programs
+        .into_iter()
+        .map(|program| python::PythonInvocation {
+            program,
+            args: vec!["-m".to_string(), "ai.bridge".to_string()],
+            current_dir: Some(root.to_path_buf()),
+        })
+        .collect()
 }
 
 impl Default for McpService {
@@ -1960,17 +1980,25 @@ mod tests {
     use std::path::Path;
 
     #[test]
-    fn venv_fallback_requires_synced_venv() {
+    fn fallbacks_prefer_synced_venv_then_system_python() {
         let dir = tempfile::tempdir().unwrap();
-        assert!(super::venv_bridge_invocation(dir.path()).is_none());
+        let programs = |root: &Path| -> Vec<String> {
+            super::fallback_bridge_invocations(root)
+                .into_iter()
+                .inspect(|inv| {
+                    assert_eq!(inv.args, ["-m", "ai.bridge"]);
+                    assert_eq!(inv.current_dir.as_deref(), Some(root));
+                })
+                .map(|inv| inv.program)
+                .collect()
+        };
+        assert_eq!(programs(dir.path()), ["python3"]);
 
         let bin = dir.path().join(".venv/bin");
         std::fs::create_dir_all(&bin).unwrap();
         std::fs::write(bin.join("python"), "").unwrap();
-        let invocation = super::venv_bridge_invocation(dir.path()).unwrap();
-        assert_eq!(invocation.program, bin.join("python").to_string_lossy());
-        assert_eq!(invocation.args, ["-m", "ai.bridge"]);
-        assert_eq!(invocation.current_dir.as_deref(), Some(dir.path()));
+        let venv = bin.join("python").to_string_lossy().to_string();
+        assert_eq!(programs(dir.path()), [venv.as_str(), "python3"]);
     }
 
     #[test]
