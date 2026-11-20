@@ -32,9 +32,14 @@ pub fn hit_state(graph: &Graph, path: &str) -> Result<HitState> {
     if entity.lifecycle == LifecycleState::Dead || crate::freshness::is_gone(Path::new(path)) {
         return Ok(HitState::Gone);
     }
-    let Ok(meta) = std::fs::metadata(path) else {
+    // Symlinks are never indexed (scanner, watcher) and never followed: a file
+    // replaced by a link counts as gone.
+    let Ok(meta) = std::fs::symlink_metadata(path) else {
         return Ok(HitState::Gone);
     };
+    if !meta.file_type().is_file() {
+        return Ok(HitState::Gone);
+    }
     let mtime = meta
         .modified()
         .ok()
@@ -118,6 +123,25 @@ mod tests {
                 pending: 3
             })
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hit_state_symlink_is_gone() {
+        let db = tempfile::NamedTempFile::new().unwrap();
+        let graph = Graph::open(db.path().to_str().unwrap()).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let file = root.join("a.py");
+        std::fs::write(&file, "one\n").unwrap();
+        let path = file.to_str().unwrap();
+        graph.upsert(&Entity::from_path(path).unwrap()).unwrap();
+        let outside = root.join("outside.txt");
+        std::fs::write(&outside, "one\n").unwrap();
+        std::fs::remove_file(&file).unwrap();
+        std::os::unix::fs::symlink(&outside, &file).unwrap();
+
+        assert_eq!(hit_state(&graph, path).unwrap(), HitState::Gone);
     }
 
     #[test]

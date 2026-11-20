@@ -261,3 +261,19 @@ def test_file_without_text_is_read_once_per_version(env, monkeypatch):
     _search(env, "payment")
 
     assert reads == [str(empty)]
+
+
+def test_file_replaced_by_symlink_is_never_read(env, tmp_path):
+    outside = tmp_path / "outside.txt"
+    outside.write_text("refund secrets from outside the project")
+    a = _index(env, "a.py", "payment")
+    Path(a).unlink()
+    Path(a).symlink_to(outside)
+
+    result = _search(env, "refund")
+
+    assert disk_state(a, "h") == "deleted"
+    assert file_hash(a) is None
+    assert a not in [i["path"] for i in result["items"]]
+    assert a not in _vector_rows(env)
+    assert a not in _fts_paths(env)

@@ -6,6 +6,7 @@ file's current bytes (the same hash the Rust graph uses).
 
 import hashlib
 import os
+import stat
 from typing import Literal
 
 DiskState = Literal["fresh", "changed", "deleted", "unreadable"]
@@ -13,13 +14,23 @@ DiskState = Literal["fresh", "changed", "deleted", "unreadable"]
 _CHUNK = 1 << 20
 
 
+def _regular_file(path: str) -> bool:
+    """A regular file at exactly ``path``, not reached through a symlink."""
+    try:
+        return stat.S_ISREG(os.lstat(path).st_mode)
+    except OSError:
+        return False
+
+
 def file_hash(path: str) -> str | None:
-    """SHA-256 hex of a regular file's bytes; None if missing, not a file, or unreadable."""
-    if not os.path.isfile(path):
+    """SHA-256 hex of a regular file's bytes; None if missing, not a regular
+    file (directories and symlinks included), or unreadable."""
+    if not _regular_file(path):
         return None
     digest = hashlib.sha256()
     try:
-        with open(path, "rb") as f:
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        with os.fdopen(fd, "rb") as f:
             while chunk := f.read(_CHUNK):
                 digest.update(chunk)
     except OSError:
@@ -29,8 +40,10 @@ def file_hash(path: str) -> str | None:
 
 def disk_state(path: str, indexed_hash: str) -> DiskState:
     """Compare the file on disk with the hash its vector row was built from."""
-    if not os.path.isfile(path):
-        # Missing, a directory now, or a symlink whose target is gone.
+    if not _regular_file(path):
+        # Missing, a directory now, or a symlink. Symlinks are never indexed
+        # (like the Rust scanner) and never read through: the target may be
+        # outside the project.
         return "deleted"
     current = file_hash(path)
     if current is None:
