@@ -1525,13 +1525,7 @@ impl McpService {
     fn python_bridge(&self, args: &serde_json::Value) -> Result<String> {
         // Resolve the AI layer only from ORGANON_PYTHON_PROJECT or the binary's
         // own location, never from the workspace the server was started in.
-        let root = python::trusted_python_project_root().ok_or_else(|| {
-            anyhow::anyhow!(
-                "semantic search needs the Organon Python layer, but its project root \
-                 could not be resolved from the organon binary location.\n{}",
-                python::python_remediation()
-            )
-        })?;
+        let root = python::trusted_python_project_root()?;
         let invocation = bridge_invocation(&root);
         debug!("python_bridge: {}", invocation.display());
         let run = |inv: &python::PythonInvocation| {
@@ -2282,6 +2276,7 @@ mod tests {
             invocation.args,
             [
                 "run",
+                "--no-dev",
                 "--project",
                 "/opt/organon",
                 "python",

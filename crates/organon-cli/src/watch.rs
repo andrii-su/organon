@@ -179,7 +179,8 @@ pub(crate) fn cmd_watch(
             }
             Err(e) => {
                 eprintln!(
-                    "warning: could not start indexer: {e} (run `organon index --watch {index_interval}` manually)"
+                    "warning: could not start indexer: {e}\nFix the Python setup above, then run \
+                     `organon index --watch {index_interval}`."
                 );
                 None
             }

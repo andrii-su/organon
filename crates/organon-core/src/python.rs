@@ -40,20 +40,15 @@ pub fn uv_bin() -> String {
     std::env::var("ORGANON_UV").unwrap_or_else(|_| "uv".to_string())
 }
 
-/// Build `uv run [--project <root>] python <args...>`.
-pub fn python_invocation(args: &[&str]) -> PythonInvocation {
-    let mut full_args = vec!["run".to_string()];
-    if let Some(project_root) = python_project_root() {
-        full_args.push("--project".to_string());
-        full_args.push(project_root.to_string_lossy().to_string());
-    }
-    full_args.push("python".to_string());
-    full_args.extend(args.iter().map(|arg| (*arg).to_string()));
-    PythonInvocation {
-        program: uv_bin(),
-        args: full_args,
-        current_dir: None,
-    }
+/// Build `uv run --no-dev --project <root> python <args...>` inside the
+/// Organon Python project.
+///
+/// The root comes only from `ORGANON_PYTHON_PROJECT` or the binary's own
+/// location ([`trusted_python_project_root`]), never from the current
+/// directory: a workspace must not be able to supply the `ai` package that
+/// runs, and uv must not sync the workspace's own project.
+pub fn python_invocation(args: &[&str]) -> anyhow::Result<PythonInvocation> {
+    Ok(python_invocation_in(&trusted_python_project_root()?, args))
 }
 
 /// Build `uv run --project <root> python <args...>` that runs *inside* `root`.
@@ -63,6 +58,9 @@ pub fn python_invocation(args: &[&str]) -> PythonInvocation {
 pub fn python_invocation_in(root: &Path, args: &[&str]) -> PythonInvocation {
     let mut full_args = vec![
         "run".to_string(),
+        // Runtime only: don't install the dev group (pytest, ruff, ...) into
+        // an installed copy on first use.
+        "--no-dev".to_string(),
         "--project".to_string(),
         root.to_string_lossy().to_string(),
         "python".to_string(),
@@ -75,56 +73,50 @@ pub fn python_invocation_in(root: &Path, args: &[&str]) -> PythonInvocation {
     }
 }
 
-/// Like [`python_project_root`], but never looks at the current directory:
-/// only `ORGANON_PYTHON_PROJECT` or the running binary's own location.
-///
-/// Use this where the current directory is an arbitrary user workspace
-/// (the MCP server), so a workspace cannot supply the Python code that runs.
-pub fn trusted_python_project_root() -> Option<PathBuf> {
-    if let Ok(root) = std::env::var("ORGANON_PYTHON_PROJECT") {
-        return Some(PathBuf::from(root));
+/// The Organon Python project root (`pyproject.toml` + `ai/indexer.py`):
+/// `ORGANON_PYTHON_PROJECT`, else the nearest ancestor of the running
+/// binary. Never the current directory, which is an arbitrary workspace.
+pub fn trusted_python_project_root() -> anyhow::Result<PathBuf> {
+    let exe = std::env::current_exe()
+        .ok()
+        .map(|exe| std::fs::canonicalize(&exe).unwrap_or(exe));
+    resolve_python_root(std::env::var("ORGANON_PYTHON_PROJECT").ok(), exe.as_deref())
+}
+
+/// An empty `ORGANON_PYTHON_PROJECT` counts as unset; a relative one is made
+/// absolute. A set value must point at the Organon project itself.
+fn resolve_python_root(env_root: Option<String>, exe: Option<&Path>) -> anyhow::Result<PathBuf> {
+    if let Some(raw) = env_root.filter(|value| !value.is_empty()) {
+        let path = PathBuf::from(&raw);
+        let path = if path.is_absolute() {
+            path
+        } else {
+            std::env::current_dir().unwrap_or_default().join(path)
+        };
+        if !is_python_project(&path) {
+            anyhow::bail!(
+                "ORGANON_PYTHON_PROJECT={raw} is not the Organon Python project \
+                 (expected pyproject.toml and ai/indexer.py in {}).\n{}",
+                path.display(),
+                python_remediation()
+            );
+        }
+        return Ok(path);
     }
-    let exe = std::env::current_exe().ok()?;
-    let real = std::fs::canonicalize(&exe).unwrap_or(exe);
-    real.parent()?
-        .ancestors()
-        .find(|dir| is_python_project(dir))
+    exe.and_then(Path::parent)
+        .and_then(|dir| dir.ancestors().find(|d| is_python_project(d)))
         .map(Path::to_path_buf)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "the Organon Python layer could not be found from the organon binary \
+                 location.\n{}",
+                python_remediation()
+            )
+        })
 }
 
 fn is_python_project(dir: &Path) -> bool {
     dir.join("pyproject.toml").exists() && dir.join("ai/indexer.py").exists()
-}
-
-/// Locate the Organon Python project (the directory holding `pyproject.toml`
-/// and `ai/indexer.py`).
-///
-/// Precedence: `ORGANON_PYTHON_PROJECT` → ancestors of the running binary →
-/// ancestors of the current directory.
-pub fn python_project_root() -> Option<PathBuf> {
-    if let Ok(root) = std::env::var("ORGANON_PYTHON_PROJECT") {
-        return Some(PathBuf::from(root));
-    }
-
-    let mut starts = Vec::new();
-    if let Ok(exe) = std::env::current_exe() {
-        let real = std::fs::canonicalize(&exe).unwrap_or(exe);
-        if let Some(parent) = real.parent() {
-            starts.push(parent.to_path_buf());
-        }
-    }
-    if let Ok(cwd) = std::env::current_dir() {
-        starts.push(cwd);
-    }
-
-    for start in starts {
-        for dir in start.ancestors() {
-            if is_python_project(dir) {
-                return Some(dir.to_path_buf());
-            }
-        }
-    }
-    None
 }
 
 /// Shown when the Python layer cannot be started or fails.
@@ -138,17 +130,66 @@ pub fn python_remediation() -> &'static str {
 mod tests {
     use super::*;
 
+    fn project(dir: &Path) {
+        std::fs::create_dir_all(dir.join("ai")).unwrap();
+        std::fs::write(dir.join("pyproject.toml"), "").unwrap();
+        std::fs::write(dir.join("ai/indexer.py"), "").unwrap();
+    }
+
     #[test]
-    fn python_invocation_uses_uv_run_python() {
-        let invocation = python_invocation(&["-m", "ai.indexer", "--health"]);
-        assert_eq!(invocation.program, uv_bin());
-        assert_eq!(invocation.args.first().unwrap(), "run");
-        assert!(invocation.args.ends_with(&[
-            "python".to_string(),
-            "-m".to_string(),
-            "ai.indexer".to_string(),
-            "--health".to_string()
-        ]));
+    fn root_from_binary_location() {
+        let dir = tempfile::tempdir().unwrap();
+        project(dir.path());
+        let exe = dir.path().join("target/release/organon");
+        assert_eq!(
+            resolve_python_root(None, Some(&exe)).unwrap(),
+            dir.path().to_path_buf()
+        );
+    }
+
+    #[test]
+    fn no_root_is_an_error_not_the_current_directory() {
+        let err = resolve_python_root(None, Some(Path::new("/usr/local/bin/organon")))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("ORGANON_PYTHON_PROJECT"), "{err}");
+    }
+
+    #[test]
+    fn env_root_wins_and_must_be_the_project() {
+        let dir = tempfile::tempdir().unwrap();
+        project(dir.path());
+        let env = Some(dir.path().to_string_lossy().into_owned());
+        assert_eq!(
+            resolve_python_root(env, None).unwrap(),
+            dir.path().to_path_buf()
+        );
+
+        let other = tempfile::tempdir().unwrap();
+        let err = resolve_python_root(Some(other.path().to_string_lossy().into_owned()), None)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("is not the Organon Python project"), "{err}");
+    }
+
+    #[test]
+    fn empty_env_root_counts_as_unset() {
+        let dir = tempfile::tempdir().unwrap();
+        project(dir.path());
+        let exe = dir.path().join("bin/organon");
+        assert_eq!(
+            resolve_python_root(Some(String::new()), Some(&exe)).unwrap(),
+            dir.path().to_path_buf()
+        );
+    }
+
+    #[test]
+    fn relative_env_root_is_made_absolute() {
+        let err = resolve_python_root(Some("no/such/dir".to_string()), None)
+            .unwrap_err()
+            .to_string();
+        let expected = std::env::current_dir().unwrap().join("no/such/dir");
+        assert!(err.contains(&expected.display().to_string()), "{err}");
     }
 
     #[test]
@@ -159,6 +200,7 @@ mod tests {
             invocation.args,
             [
                 "run",
+                "--no-dev",
                 "--project",
                 "/opt/organon",
                 "python",
