@@ -120,6 +120,13 @@ def update_fts(db_path: Path, path: str, name: str, text: str) -> None:
         )
 
 
+def delete_fts(db_path: Path, path: str) -> None:
+    """Remove the FTS row for one path."""
+    with closing(sqlite3.connect(str(db_path))) as conn:
+        conn.execute("DELETE FROM entities_fts WHERE path = ?", (path,))
+        conn.commit()
+
+
 def prune_fts(db_path: Path, active_paths: set[str], path_prefixes: list[str] | None = None) -> int:
     """Remove FTS rows that no longer belong to an active graph entity."""
     prefixes = _normalize_prefixes(path_prefixes)

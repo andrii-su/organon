@@ -588,3 +588,15 @@ def test_run_once_empty_db(tmp_path, monkeypatch):
     stats = run_once(db)
     assert stats["total"] == 0
     assert stats["indexed"] == 0
+
+
+def test_delete_fts_removes_only_that_path(tmp_db):
+    from ai.indexer import delete_fts
+
+    _seed_fts(tmp_db, ["/src/main.py", "/src/utils.py"])
+    delete_fts(tmp_db, "/src/main.py")
+
+    conn = sqlite3.connect(str(tmp_db))
+    paths = [r[0] for r in conn.execute("SELECT path FROM entities_fts")]
+    conn.close()
+    assert paths == ["/src/utils.py"]

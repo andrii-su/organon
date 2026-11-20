@@ -134,3 +134,41 @@ def test_model_is_initialized_once_under_concurrent_calls(monkeypatch):
 
     assert constructor_calls == 1
     assert all(result is model for result in models)
+
+
+def _seed_rows(vec_dir, rows):
+    table = store._get_table(str(vec_dir))
+    table.add(
+        [
+            {
+                "path": path,
+                "content_hash": content_hash,
+                "text_preview": path,
+                "vector": [1.0] + [0.0] * (store.EMBED_DIM - 1),
+                "indexed_at": indexed_at,
+            }
+            for path, content_hash, indexed_at in rows
+        ]
+    )
+
+
+def test_search_dedupes_by_path_keeping_newest(monkeypatch, tmp_path):
+    vec = tmp_path / "vec"
+    _seed_rows(vec, [("/a.py", "old", 1), ("/a.py", "new", 2), ("/b.py", "b", 1)])
+    monkeypatch.setattr(store, "embed_text", lambda _t: [1.0] + [0.0] * (store.EMBED_DIM - 1))
+
+    rows = store.search("q", limit=10, db_path=str(vec))
+
+    a_rows = [r for r in rows if r["path"] == "/a.py"]
+    assert len(a_rows) == 1
+    assert a_rows[0]["content_hash"] == "new"
+    assert all("content_hash" in r for r in rows)
+
+
+def test_get_all_entries_dedupes_by_path_keeping_newest(tmp_path):
+    vec = tmp_path / "vec"
+    _seed_rows(vec, [("/a.py", "old", 1), ("/a.py", "new", 2)])
+
+    entries = store.get_all_entries(db_path=str(vec))
+
+    assert entries == [{"path": "/a.py", "content_hash": "new"}]

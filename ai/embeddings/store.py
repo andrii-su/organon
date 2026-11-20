@@ -149,7 +149,7 @@ def search(
         results = [r for r in results if r["path"].startswith(path_prefix)]
         logger.debug("search: %d results after prefix filter", len(results))
 
-    results = results[:limit]
+    results = _newest_per_path(results)[:limit]
     logger.debug("search: %d results", len(results))
 
     return [
@@ -157,9 +157,28 @@ def search(
             "path": r["path"],
             "score": float(1 - r.get("_distance", 0)),
             "text_preview": r["text_preview"],
+            "content_hash": r["content_hash"],
         }
         for r in results
     ]
+
+
+def _newest_per_path(rows: list[dict]) -> list[dict]:
+    """Keep one row per path: the one with the newest ``indexed_at``.
+
+    Concurrent writers (indexer, search refresh) can briefly leave two rows for
+    one path; the newest is the current one. Order of first appearance is kept.
+    """
+    best: dict[str, dict] = {}
+    order: list[str] = []
+    for row in rows:
+        path = row["path"]
+        if path not in best:
+            order.append(path)
+            best[path] = row
+        elif (row.get("indexed_at") or 0) > (best[path].get("indexed_at") or 0):
+            best[path] = row
+    return [best[path] for path in order]
 
 
 def get_indexed_hashes(db_path: str | None = None) -> set[str]:
@@ -179,8 +198,16 @@ def get_all_entries(db_path: str | None = None) -> list[dict]:
     """Return all (path, content_hash) pairs stored in the vector store."""
     try:
         table = _get_table(db_path)
-        rows = table.search().select(["path", "content_hash"]).limit(100_000).to_list()
-        return [{"path": r["path"], "content_hash": r["content_hash"]} for r in rows]
+        rows = (
+            table.search()
+            .select(["path", "content_hash", "indexed_at"])
+            .limit(100_000)
+            .to_list()
+        )
+        return [
+            {"path": r["path"], "content_hash": r["content_hash"]}
+            for r in _newest_per_path(rows)
+        ]
     except Exception as e:
         logger.warning("get_all_entries failed: %s", e)
         return []
