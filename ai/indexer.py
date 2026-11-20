@@ -12,6 +12,7 @@ Usage:
 
 import argparse
 import importlib.metadata
+import json
 import logging
 import os
 import sqlite3
@@ -219,8 +220,15 @@ def run_once(
     *,
     vectors_db_path: str | None = None,
     path_prefixes: list[str] | None = None,
+    no_text_cache: set[tuple[str, str]] | None = None,
 ) -> dict:
-    """Index all entities not yet in vector store. Returns stats dict."""
+    """Index all entities not yet in vector store. Returns stats dict.
+
+    ``no_text_cache`` holds ``(path, content_hash)`` pairs that had no
+    extractable text (empty or binary files). Pass the same set on every call
+    in watch mode so such files are read once per content version instead of
+    on every cycle.
+    """
     prefixes = _normalize_prefixes(path_prefixes)
     # Reconcile stale paths in lancedb (e.g. from rename/move operations).
     try:
@@ -245,6 +253,8 @@ def run_once(
         _index_routes(db_path, active_paths, prefixes)
         return {"total": 0, "indexed": 0, "skipped": 0, "errors": 0, "sensitive_skipped": 0}
 
+    if no_text_cache is not None:
+        no_text_cache.intersection_update((e["path"], e["content_hash"]) for e in entities)
     logger.info("indexing %d entities from graph", len(entities))
     # Track (path, content_hash) pairs, not bare hashes: index_file stores one
     # row per path, so identical content at two paths must each be embedded.
@@ -282,10 +292,19 @@ def run_once(
             stats["skipped"] += 1
             continue
 
+        if no_text_cache is not None and (path, content_hash) in no_text_cache:
+            logger.debug("skipped (no text, cached): %s", path)
+            stats["skipped"] += 1
+            continue
+
         text = extract_text(path)
         if not text or not text.strip():
             logger.debug("skipped (no text): %s", path)
             stats["skipped"] += 1
+            # Cache only files that were actually read: an unreadable or
+            # vanished file must be retried on the next cycle.
+            if no_text_cache is not None and _readable_file(path):
+                no_text_cache.add((path, content_hash))
             continue
 
         try:
@@ -331,6 +350,41 @@ def run_once(
     return stats
 
 
+def _readable_file(path: str) -> bool:
+    """True for an existing regular file this process can read."""
+    return os.path.isfile(path) and os.access(path, os.R_OK)
+
+
+def vector_coverage(db_path: Path, path_prefixes: list[str] | None = None) -> dict:
+    """Vector coverage for the entities in scope.
+
+    ``vectors``: vector rows in scope. ``pending``: entities with text whose
+    current content has no vector yet. ``not_embeddable``: entities without a
+    vector that the indexer never embeds (ignored, sensitive, empty or binary).
+    Only entities without an up-to-date vector are read.
+    """
+    prefixes = _normalize_prefixes(path_prefixes)
+    entries = [
+        e for e in get_all_entries() if not prefixes or _path_in_scope(e["path"], prefixes)
+    ]
+    indexed_pairs = {(e["path"], e["content_hash"]) for e in entries}
+    pending = 0
+    not_embeddable = 0
+    for entity in get_entities(db_path, prefixes):
+        path = entity["path"]
+        if (path, entity["content_hash"]) in indexed_pairs:
+            continue
+        if is_ignored(path) or is_sensitive(path):
+            not_embeddable += 1
+            continue
+        text = extract_text(path)
+        if text and text.strip():
+            pending += 1
+        else:
+            not_embeddable += 1
+    return {"vectors": len(entries), "pending": pending, "not_embeddable": not_embeddable}
+
+
 def _index_routes(db_path: Path, active_paths: set[str], prefixes: list[str]) -> None:
     paths = sorted(
         path
@@ -374,6 +428,11 @@ def main() -> None:
         "--stats", action="store_true", help="Print vector count for the selected scope"
     )
     parser.add_argument(
+        "--coverage",
+        action="store_true",
+        help="Print vector coverage for the selected scope as JSON",
+    )
+    parser.add_argument(
         "--path-prefix",
         action="append",
         dest="path_prefixes",
@@ -397,10 +456,15 @@ def main() -> None:
         print(count)
         return
 
+    if args.coverage:
+        print(json.dumps(vector_coverage(db_path, args.path_prefixes)))
+        return
+
     if args.watch:
         logger.info("watch mode: every %ds. Ctrl+C to stop.", args.watch)
+        no_text_cache: set[tuple[str, str]] = set()
         while True:
-            run_once(db_path, path_prefixes=args.path_prefixes)
+            run_once(db_path, path_prefixes=args.path_prefixes, no_text_cache=no_text_cache)
             time.sleep(args.watch)
     else:
         run_once(db_path, path_prefixes=args.path_prefixes)

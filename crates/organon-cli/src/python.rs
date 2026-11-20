@@ -36,15 +36,26 @@ pub fn indexer_health_with_env(envs: &[(String, String)]) -> Result<String> {
     python_run_with_env(&["-m", INDEXER_MODULE, "--health"], envs)
 }
 
-pub fn vector_count_with_env(
+/// Vector coverage for one scope, as reported by `ai.indexer --coverage`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct VectorCoverage {
+    /// Vector rows in scope.
+    pub vectors: usize,
+    /// Files with text whose current content has no vector yet.
+    pub pending: usize,
+    /// Files the indexer never embeds: ignored, sensitive, empty or binary.
+    pub not_embeddable: usize,
+}
+
+pub fn vector_coverage_with_env(
     db_path: &Path,
     path_prefix: Option<&Path>,
     envs: &[(String, String)],
-) -> Result<usize> {
+) -> Result<VectorCoverage> {
     let mut args = vec![
         "-m".to_string(),
         INDEXER_MODULE.to_string(),
-        "--stats".to_string(),
+        "--coverage".to_string(),
         "--db".to_string(),
         db_path.to_string_lossy().to_string(),
     ];
@@ -54,7 +65,7 @@ pub fn vector_count_with_env(
     }
     let refs: Vec<_> = args.iter().map(String::as_str).collect();
     let output = python_run_with_env(&refs, envs)?;
-    Ok(output.parse()?)
+    Ok(serde_json::from_str(output.trim())?)
 }
 
 pub fn spawn_indexer_with_env(
