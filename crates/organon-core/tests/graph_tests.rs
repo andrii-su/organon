@@ -894,12 +894,12 @@ fn purge_removes_content_stored_before_a_path_was_sensitive() {
         graph.update_fts(path.to_str().unwrap(), "x", "v2").unwrap();
     }
     // Simulate rows written by an older version for a path now sensitive.
-    let secret = root.join("example.env");
+    let env_file = root.join("example.env");
     let conn = rusqlite::Connection::open(db.path()).unwrap();
     for table in ["entities", "entity_history", "entities_fts"] {
         conn.execute(
             &format!("UPDATE {table} SET path = ?1 WHERE path = ?2"),
-            [secret.to_str().unwrap(), leaked.to_str().unwrap()],
+            [env_file.to_str().unwrap(), leaked.to_str().unwrap()],
         )
         .unwrap();
     }
@@ -907,7 +907,7 @@ fn purge_removes_content_stored_before_a_path_was_sensitive() {
         "INSERT INTO entity_history_archive
            (id, entity_id, path, event, recorded_at, text_change)
          VALUES (999, 'x', ?1, 'modified', 1, 'old secret')",
-        [secret.to_str().unwrap()],
+        [env_file.to_str().unwrap()],
     )
     .unwrap();
     let snapshots_before = count(&db, "SELECT COUNT(*) FROM file_snapshots");
@@ -925,7 +925,7 @@ fn purge_removes_content_stored_before_a_path_was_sensitive() {
               AND (text_change IS NOT NULL OR before_text IS NOT NULL))
          + (SELECT COUNT(*) FROM entity_history_archive WHERE path = '{0}' AND text_change IS NOT NULL)
          + (SELECT COUNT(*) FROM entities_fts WHERE path = '{0}')",
-        secret.display()
+        env_file.display()
     );
     assert_eq!(count(&db, &leftover), 0);
     // non-sensitive content is untouched
@@ -956,10 +956,10 @@ fn purge_follows_entity_renamed_to_sensitive_name() {
         .upsert(&Entity::from_path(notes.to_str().unwrap()).unwrap())
         .unwrap();
     // The file becomes prod.env; older history rows keep the benign path.
-    let secret = root.join("prod.env");
-    std::fs::rename(&notes, &secret).unwrap();
+    let env_file = root.join("prod.env");
+    std::fs::rename(&notes, &env_file).unwrap();
     graph
-        .rename_entity(notes.to_str().unwrap(), secret.to_str().unwrap())
+        .rename_entity(notes.to_str().unwrap(), env_file.to_str().unwrap())
         .unwrap();
     assert!(
         count(

@@ -197,12 +197,12 @@ mod excerpt_tests {
     #[test]
     fn file_excerpt_never_returns_sensitive_content() {
         let dir = tempfile::tempdir().unwrap();
-        let secret = dir.path().join("prod.env");
+        let env_file = dir.path().join("prod.env");
         let plain = dir.path().join("main.py");
-        std::fs::write(&secret, "API_KEY=s3cr3t\n").unwrap();
+        std::fs::write(&env_file, "API_KEY=s3cr3t\n").unwrap();
         std::fs::write(&plain, "print(1)\n").unwrap();
 
-        assert_eq!(file_excerpt(secret.to_str().unwrap(), 100), None);
+        assert_eq!(file_excerpt(env_file.to_str().unwrap(), 100), None);
         assert_eq!(
             file_excerpt(plain.to_str().unwrap(), 5).as_deref(),
             Some("print")
