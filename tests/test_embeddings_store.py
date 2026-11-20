@@ -172,3 +172,15 @@ def test_get_all_entries_dedupes_by_path_keeping_newest(tmp_path):
     entries = store.get_all_entries(db_path=str(vec))
 
     assert entries == [{"path": "/a.py", "content_hash": "new"}]
+
+
+def test_search_by_path_dedupes_and_excludes_seed(tmp_path):
+    vec = tmp_path / "vec"
+    _seed_rows(vec, [("/seed.py", "s", 1), ("/a.py", "old", 1), ("/a.py", "new", 2), ("/b.py", "b", 1)])
+
+    rows = store.search_by_path("/seed.py", limit=10, db_path=str(vec))
+
+    paths = [r["path"] for r in rows]
+    assert "/seed.py" not in paths
+    assert paths.count("/a.py") == 1
+    assert next(r for r in rows if r["path"] == "/a.py")["content_hash"] == "new"
