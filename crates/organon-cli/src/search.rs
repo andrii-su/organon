@@ -5,6 +5,7 @@ use anyhow::Result;
 use clap::ValueEnum;
 use organon_core::{
     config::OrgConfig,
+    fresh::{hit_state, parse_bridge_search, HitState},
     graph::{entity_matches_filter, FindFilter, Graph},
 };
 use serde::{Deserialize, Serialize};
@@ -56,6 +57,9 @@ pub struct SearchHit {
     pub source: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub explanation: Option<SearchExplanation>,
+    /// Text-index-only hit whose file changed after indexing; re-read it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub changed_since_indexed: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -65,6 +69,9 @@ pub struct SearchPage {
     pub limit: usize,
     pub offset: usize,
     pub has_more: bool,
+    /// Changed files the bridge's query-time refresh left for later.
+    #[serde(default)]
+    pub refresh_pending: usize,
 }
 
 // Internal per-path accumulator used during merge phase.
@@ -130,6 +137,7 @@ pub fn search_entities(params: SearchParams) -> Result<SearchPage> {
     });
 
     let mut merged: BTreeMap<String, MergeEntry> = BTreeMap::new();
+    let mut refresh_pending = 0;
     let desired = (params.limit + params.offset).max(1);
     let candidate_limit = if metadata_filter_requested(params.metadata_filter) {
         desired.saturating_mul(12)
@@ -144,12 +152,15 @@ pub fn search_entities(params: SearchParams) -> Result<SearchPage> {
             "limit": candidate_limit,
             "db_path": params.config.indexer.vectors_path,
             "path_prefix": path_prefix,
+            "graph_db": params.db_path,
         });
         let output = python_run_with_env(
             &["-m", "ai.bridge"],
             &bridge_env(params.config, &bridge_args),
         )?;
-        let results: Vec<serde_json::Value> = serde_json::from_str(&output)?;
+        let parsed = parse_bridge_search::<serde_json::Value>(&output)?;
+        refresh_pending = parsed.refresh.map_or(0, |r| r.pending);
+        let results = parsed.items;
         let weight = if matches!(params.mode, SearchMode::Hybrid) {
             0.7
         } else {
@@ -220,6 +231,24 @@ pub fn search_entities(params: SearchParams) -> Result<SearchPage> {
     }
 
     let mut results: Vec<_> = merged.into_iter().collect();
+    // Final guard: never return a deleted file; flag text-only hits whose file
+    // changed after indexing (the vector side was refreshed by Python).
+    let mut changed = std::collections::HashSet::new();
+    if !results.is_empty() {
+        let graph = Graph::open(params.db_path.to_string_lossy().as_ref())?;
+        let mut kept = Vec::with_capacity(results.len());
+        for (path, entry) in results {
+            match hit_state(&graph, &path)? {
+                HitState::Gone => continue,
+                HitState::ChangedSinceIndexed if !entry.from_vector => {
+                    changed.insert(path.clone());
+                }
+                _ => {}
+            }
+            kept.push((path, entry));
+        }
+        results = kept;
+    }
     results.sort_by(|a, b| b.1.combined_score.total_cmp(&a.1.combined_score));
     if metadata_filter_requested(params.metadata_filter) {
         let graph = Graph::open(params.db_path.to_string_lossy().as_ref())?;
@@ -244,6 +273,7 @@ pub fn search_entities(params: SearchParams) -> Result<SearchPage> {
             };
             SearchHit {
                 score: entry.combined_score,
+                changed_since_indexed: changed.contains(&path),
                 path,
                 source,
                 explanation,
@@ -257,6 +287,7 @@ pub fn search_entities(params: SearchParams) -> Result<SearchPage> {
         limit: params.limit,
         offset: params.offset,
         has_more: params.offset + params.limit < total,
+        refresh_pending,
     })
 }
 
@@ -458,6 +489,7 @@ pub fn search_by_example(
         "path": path_str,
         "limit": (limit + offset).max(1),
         "db_path": config.indexer.vectors_path,
+        "graph_db": config.indexer.db_path,
         "path_prefix": path_prefix,
     });
     let output = python_run_with_env(&["-m", "ai.bridge"], &bridge_env(config, &bridge_args))?;
@@ -474,6 +506,7 @@ pub fn search_by_example(
                 score: r["score"].as_f64().unwrap_or(0.0),
                 source: "vector".to_string(),
                 explanation: None,
+                changed_since_indexed: false,
             })
         })
         .collect();
@@ -484,11 +517,50 @@ pub fn search_by_example(
         limit,
         offset,
         has_more: offset + limit < total,
+        refresh_pending: 0,
     })
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn search_entities_drops_deleted_fts_hit() {
+        let db = tempfile::NamedTempFile::new().unwrap();
+        let graph = Graph::open(db.path().to_str().unwrap()).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let mut paths = Vec::new();
+        for name in ["live.py", "gone.py"] {
+            let path = root.join(name);
+            std::fs::write(&path, "zebra crossing\n").unwrap();
+            let path = path.to_string_lossy().into_owned();
+            graph
+                .upsert(&organon_core::entity::Entity::from_path(&path).unwrap())
+                .unwrap();
+            graph.update_fts(&path, name, "zebra crossing").unwrap();
+            paths.push(path);
+        }
+        std::fs::remove_file(&paths[1]).unwrap();
+        let config = OrgConfig::default();
+
+        let page = search_entities(SearchParams {
+            query: "zebra",
+            limit: 5,
+            offset: 0,
+            dir: None,
+            mode: SearchMode::Fts,
+            metadata_filter: &FindFilter::default(),
+            config: &config,
+            db_path: db.path(),
+            explain: false,
+        })
+        .unwrap();
+
+        let found: Vec<_> = page.items.iter().map(|h| h.path.as_str()).collect();
+        assert_eq!(found, [paths[0].as_str()]);
+        assert_eq!(page.refresh_pending, 0);
+    }
+
     use organon_core::{
         entity::{Entity, LifecycleState},
         graph::Graph,
@@ -684,6 +756,7 @@ mod tests {
             score: 0.5,
             source: "vector".to_string(),
             explanation: None,
+            changed_since_indexed: false,
         };
         let json = serde_json::to_value(&hit).unwrap();
         assert!(

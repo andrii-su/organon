@@ -91,6 +91,12 @@ pub(crate) fn cmd_search(
         explain,
     })?;
 
+    if results.refresh_pending > 0 {
+        eprintln!(
+            "note: {} changed file(s) not yet re-indexed; results may miss them",
+            results.refresh_pending
+        );
+    }
     if results.items.is_empty() {
         println!("(no results — run `organon index` first)");
         return Ok(());

@@ -8,6 +8,7 @@ use anyhow::{bail, Result};
 use axum::Router;
 use chrono::NaiveDate;
 use log::debug;
+use organon_core::fresh::{hit_state, parse_bridge_search, HitState, RefreshStats};
 use organon_core::{
     config::OrgConfig,
     entity::Entity,
@@ -87,6 +88,10 @@ pub struct SearchHit {
     pub source: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub explanation: Option<SearchExplanation>,
+    /// The file changed on disk after it was indexed and this hit came from
+    /// the text index only, which is not refreshed at query time. Re-read it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub changed_since_indexed: bool,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -316,6 +321,8 @@ pub struct SearchFilesResponse {
     pub items: Vec<SearchHit>,
     #[serde(default)]
     pub index: IndexFreshness,
+    #[serde(default)]
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -1115,6 +1122,7 @@ impl McpService {
             "limit": limit,
             "db_path": self.config.indexer.vectors_path,
             "path_prefix": path_prefix,
+            "graph_db": self.db_path,
         }))?;
         let rows: Vec<serde_json::Value> = serde_json::from_str(&output)?;
         Ok(rows
@@ -1125,6 +1133,7 @@ impl McpService {
                     score: r["score"].as_f64().unwrap_or(0.0),
                     source: "vector".to_string(),
                     explanation: None,
+                    changed_since_indexed: false,
                 })
             })
             .collect())
@@ -1182,6 +1191,22 @@ impl McpService {
         metadata_filter: &FindFilter,
         explain: bool,
     ) -> Result<Vec<SearchHit>> {
+        self.search_files_with_refresh(query, limit, path_prefix, mode, metadata_filter, explain)
+            .map(|(hits, _)| hits)
+    }
+
+    /// Search, also returning what the bridge's query-time refresh did
+    /// (`None` for FTS-only searches and for an older Python layer).
+    pub fn search_files_with_refresh(
+        &self,
+        query: &str,
+        limit: usize,
+        path_prefix: Option<&str>,
+        mode: SearchMode,
+        metadata_filter: &FindFilter,
+        explain: bool,
+    ) -> Result<(Vec<SearchHit>, Option<RefreshStats>)> {
+        let mut refresh = None;
         let limit = limit.min(MAX_MCP_RESULTS);
         let path_prefix = self.effective_prefix(path_prefix)?;
         let mut merged: BTreeMap<String, MergeEntry> = BTreeMap::new();
@@ -1192,7 +1217,9 @@ impl McpService {
         };
 
         if matches!(mode, SearchMode::Vector | SearchMode::Hybrid) {
-            let results = self.vector_search(query, candidate_limit, path_prefix.as_deref())?;
+            let (results, stats) =
+                self.vector_search(query, candidate_limit, path_prefix.as_deref())?;
+            refresh = stats;
             let weight = if matches!(mode, SearchMode::Hybrid) {
                 0.7
             } else {
@@ -1259,6 +1286,24 @@ impl McpService {
         }
 
         let mut rows: Vec<_> = merged.into_iter().collect();
+        // Final guard: never return a deleted file; flag text-only hits whose
+        // file changed after indexing (the vector side was refreshed by Python).
+        let mut changed = std::collections::HashSet::new();
+        if !rows.is_empty() {
+            let graph = self.open_graph()?;
+            let mut kept = Vec::with_capacity(rows.len());
+            for (path, entry) in rows {
+                match hit_state(&graph, &path)? {
+                    HitState::Gone => continue,
+                    HitState::ChangedSinceIndexed if !entry.from_vector => {
+                        changed.insert(path.clone());
+                    }
+                    _ => {}
+                }
+                kept.push((path, entry));
+            }
+            rows = kept;
+        }
         rows.sort_by(|a, b| b.1.combined_score.total_cmp(&a.1.combined_score));
         if metadata_filter_requested(metadata_filter) {
             let graph = self.open_graph()?;
@@ -1266,28 +1311,31 @@ impl McpService {
         }
         rows.truncate(limit);
 
-        Ok(rows
-            .into_iter()
-            .map(|(path, entry)| {
-                let source = match (entry.from_vector, entry.from_fts) {
-                    (true, true) => "hybrid".to_string(),
-                    (true, false) => "vector".to_string(),
-                    (false, true) => "fts".to_string(),
-                    (false, false) => "-".to_string(),
-                };
-                let explanation = if explain {
-                    Some(build_explanation(query, &path, &entry, mode))
-                } else {
-                    None
-                };
-                SearchHit {
-                    score: entry.combined_score,
-                    path,
-                    source,
-                    explanation,
-                }
-            })
-            .collect())
+        Ok((
+            rows.into_iter()
+                .map(|(path, entry)| {
+                    let source = match (entry.from_vector, entry.from_fts) {
+                        (true, true) => "hybrid".to_string(),
+                        (true, false) => "vector".to_string(),
+                        (false, true) => "fts".to_string(),
+                        (false, false) => "-".to_string(),
+                    };
+                    let explanation = if explain {
+                        Some(build_explanation(query, &path, &entry, mode))
+                    } else {
+                        None
+                    };
+                    SearchHit {
+                        score: entry.combined_score,
+                        changed_since_indexed: changed.contains(&path),
+                        path,
+                        source,
+                        explanation,
+                    }
+                })
+                .collect::<Vec<_>>(),
+            refresh,
+        ))
     }
 
     pub fn build_context(&self, params: BuildContextParams<'_>) -> Result<ContextPack> {
@@ -1338,6 +1386,7 @@ impl McpService {
                         score: 1.0,
                         source: "seed".to_string(),
                         explanation: None,
+                        changed_since_indexed: false,
                     },
                 );
             }
@@ -1442,15 +1491,18 @@ impl McpService {
         query: &str,
         limit: usize,
         path_prefix: Option<&str>,
-    ) -> Result<Vec<VectorRow>> {
+    ) -> Result<(Vec<VectorRow>, Option<RefreshStats>)> {
+        // `graph_db` makes the bridge refresh stale rows before answering.
         let output = self.python_bridge(&serde_json::json!({
             "op": "search",
             "query": query,
             "limit": limit,
             "db_path": self.config.indexer.vectors_path,
             "path_prefix": path_prefix,
+            "graph_db": self.db_path,
         }))?;
-        Ok(serde_json::from_str(&output)?)
+        let parsed = parse_bridge_search::<VectorRow>(&output)?;
+        Ok((parsed.items, parsed.refresh))
     }
 
     fn open_graph(&self) -> Result<Graph> {
@@ -1767,7 +1819,7 @@ impl OrganonMcpServer {
         )
         .map_err(|e| e.to_string())?;
         self.service
-            .search_files(
+            .search_files_with_refresh(
                 &req.query,
                 req.limit.unwrap_or(10),
                 req.path_prefix.as_deref(),
@@ -1775,10 +1827,11 @@ impl OrganonMcpServer {
                 &metadata_filter,
                 explain,
             )
-            .map(|items| {
+            .map(|(items, refresh)| {
                 Json(SearchFilesResponse {
                     items,
                     index: self.service.index_freshness(),
+                    warnings: refresh_warning(refresh).into_iter().collect(),
                 })
             })
             .map_err(|e| e.to_string())
@@ -1920,6 +1973,7 @@ impl OrganonMcpServer {
                 Json(SearchFilesResponse {
                     items,
                     index: self.service.index_freshness(),
+                    warnings: Vec::new(),
                 })
             })
             .map_err(|e| e.to_string())
@@ -2049,6 +2103,16 @@ fn to_mcp_error(err: anyhow::Error) -> McpError {
         "internal_error",
         Some(serde_json::json!({ "error": err.to_string() })),
     )
+}
+
+/// Warning for the response when the bridge's refresh ran out of budget.
+fn refresh_warning(refresh: Option<RefreshStats>) -> Option<String> {
+    refresh.filter(|r| r.pending > 0).map(|r| {
+        format!(
+            "{} changed file(s) not yet re-indexed; results may miss them",
+            r.pending
+        )
+    })
 }
 
 /// Raw row returned by the Python vector search function.
@@ -2663,17 +2727,106 @@ mod tests {
         assert_eq!(result.edges.len(), 2);
     }
 
+    fn real_fts_files(graph: &Graph, dir: &Path, names: &[&str]) -> Vec<String> {
+        names
+            .iter()
+            .map(|name| {
+                let path = dir.join(name);
+                std::fs::write(&path, "zebra crossing\n").unwrap();
+                let path = path.to_string_lossy().into_owned();
+                graph.upsert(&Entity::from_path(&path).unwrap()).unwrap();
+                graph.update_fts(&path, name, "zebra crossing").unwrap();
+                path
+            })
+            .collect()
+    }
+
+    #[test]
+    fn search_files_drops_deleted_fts_hit() {
+        let (svc, graph, _db) = temp_service();
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let paths = real_fts_files(&graph, &root, &["live.py", "gone.py"]);
+        std::fs::remove_file(&paths[1]).unwrap();
+
+        let hits = svc
+            .search_files(
+                "zebra",
+                5,
+                None,
+                SearchMode::Fts,
+                &FindFilter::default(),
+                false,
+            )
+            .unwrap();
+
+        let found: Vec<_> = hits.iter().map(|h| h.path.as_str()).collect();
+        assert_eq!(found, [paths[0].as_str()]);
+    }
+
+    #[test]
+    fn search_files_marks_changed_fts_hit() {
+        let (svc, graph, _db) = temp_service();
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let paths = real_fts_files(&graph, &root, &["live.py", "edited.py"]);
+        std::fs::write(&paths[1], "zebra crossing, now much longer\n").unwrap();
+
+        let hits = svc
+            .search_files(
+                "zebra",
+                5,
+                None,
+                SearchMode::Fts,
+                &FindFilter::default(),
+                false,
+            )
+            .unwrap();
+
+        let edited = hits.iter().find(|h| h.path == paths[1]).unwrap();
+        let live = hits.iter().find(|h| h.path == paths[0]).unwrap();
+        assert!(edited.changed_since_indexed);
+        assert!(!live.changed_since_indexed);
+        assert!(serde_json::to_string(edited)
+            .unwrap()
+            .contains("changed_since_indexed"));
+        assert!(!serde_json::to_string(live)
+            .unwrap()
+            .contains("changed_since_indexed"));
+    }
+
+    #[test]
+    fn refresh_warning_only_when_pending() {
+        use organon_core::fresh::RefreshStats;
+        assert_eq!(refresh_warning(None), None);
+        assert_eq!(refresh_warning(Some(RefreshStats::default())), None);
+        assert_eq!(
+            refresh_warning(Some(RefreshStats {
+                pending: 4,
+                ..Default::default()
+            }))
+            .as_deref(),
+            Some("4 changed file(s) not yet re-indexed; results may miss them")
+        );
+    }
+
     #[test]
     fn search_files_fts_works() {
         let (svc, graph, _file) = temp_service();
-        graph.upsert(&test_entity("/tmp/graph.rs")).unwrap();
-        graph.upsert(&test_entity("/tmp/notes.rs")).unwrap();
-        graph
-            .update_fts("/tmp/graph.rs", "graph.rs", "entity graph sqlite search")
-            .unwrap();
-        graph
-            .update_fts("/tmp/notes.rs", "notes.rs", "gardening shopping list")
-            .unwrap();
+        // Real files: search drops hits whose file is gone from disk.
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let graph_rs = root.join("graph.rs").to_string_lossy().into_owned();
+        let notes_rs = root.join("notes.rs").to_string_lossy().into_owned();
+        for (path, text) in [
+            (&graph_rs, "entity graph sqlite search"),
+            (&notes_rs, "gardening shopping list"),
+        ] {
+            std::fs::write(path, text).unwrap();
+            graph.upsert(&Entity::from_path(path).unwrap()).unwrap();
+            let name = Path::new(path).file_name().unwrap().to_str().unwrap();
+            graph.update_fts(path, name, text).unwrap();
+        }
 
         let hits = svc
             .search_files(
@@ -2685,7 +2838,7 @@ mod tests {
                 false,
             )
             .unwrap();
-        assert_eq!(hits[0].path, "/tmp/graph.rs");
+        assert_eq!(hits[0].path, graph_rs);
         assert!(
             hits[0].explanation.is_none(),
             "explain=false should not attach explanation"
@@ -2695,14 +2848,20 @@ mod tests {
     #[test]
     fn search_files_fts_explain_returns_explanation() {
         let (svc, graph, _file) = temp_service();
-        graph.upsert(&test_entity("/tmp/graph.rs")).unwrap();
-        graph.upsert(&test_entity("/tmp/notes.rs")).unwrap();
-        graph
-            .update_fts("/tmp/graph.rs", "graph.rs", "entity graph sqlite search")
-            .unwrap();
-        graph
-            .update_fts("/tmp/notes.rs", "notes.rs", "gardening shopping list")
-            .unwrap();
+        // Real files: search drops hits whose file is gone from disk.
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let graph_rs = root.join("graph.rs").to_string_lossy().into_owned();
+        let notes_rs = root.join("notes.rs").to_string_lossy().into_owned();
+        for (path, text) in [
+            (&graph_rs, "entity graph sqlite search"),
+            (&notes_rs, "gardening shopping list"),
+        ] {
+            std::fs::write(path, text).unwrap();
+            graph.upsert(&Entity::from_path(path).unwrap()).unwrap();
+            let name = Path::new(path).file_name().unwrap().to_str().unwrap();
+            graph.update_fts(path, name, text).unwrap();
+        }
 
         let hits = svc
             .search_files(
@@ -2714,7 +2873,7 @@ mod tests {
                 true,
             )
             .unwrap();
-        assert_eq!(hits[0].path, "/tmp/graph.rs");
+        assert_eq!(hits[0].path, graph_rs);
         let exp = hits[0]
             .explanation
             .as_ref()
