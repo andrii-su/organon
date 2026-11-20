@@ -75,3 +75,18 @@ def test_all_code_extensions_extractable(tmp_path):
         result = extract_text(str(f))
         assert result is not None, f"failed for {ext}"
         assert "content" in result
+
+
+def test_never_extracts_sensitive_files(tmp_path):
+    secret = tmp_path / "prod.env"
+    secret.write_text("API_KEY=zzz\n")
+    assert extract_text(str(secret)) is None
+
+
+def test_bridge_extract_text_withholds_sensitive_files(tmp_path):
+    from ai.bridge import _run
+
+    secret = tmp_path / ".pgpass"
+    secret.write_text("db:5432:*:u:p\n")
+    result = _run({"op": "extract_text", "path": str(secret)})
+    assert result["content"] == ""

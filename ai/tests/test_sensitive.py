@@ -1,5 +1,7 @@
 """Tests for ai.common.sensitive — sensitive file detection."""
 
+from pathlib import Path
+
 import pytest
 
 from ai.common.sensitive import is_sensitive, sensitive_reason
@@ -141,3 +143,24 @@ def test_extra_patterns_empty_env_var(monkeypatch):
     monkeypatch.setenv("ORGANON_SENSITIVE_EXTRA", "")
     # Should not crash, normal file should still not be sensitive
     assert not is_sensitive("/home/user/project/main.py")
+
+
+# ── shared cases (kept in sync with crates/organon-core/src/sensitive.rs) ─────
+
+_CASES_FILE = Path(__file__).resolve().parents[2] / "tests" / "fixtures" / "sensitive_cases.txt"
+
+
+def _shared_cases() -> list[tuple[str, bool]]:
+    cases = []
+    for line in _CASES_FILE.read_text().splitlines():
+        if not line.strip() or line.startswith("#"):
+            continue
+        verdict, path = line.split("\t", 1)
+        cases.append((path, verdict == "sensitive"))
+    return cases
+
+
+@pytest.mark.parametrize(("path", "expected"), _shared_cases())
+def test_shared_sensitive_cases(path, expected, monkeypatch):
+    monkeypatch.delenv("ORGANON_SENSITIVE_EXTRA", raising=False)
+    assert is_sensitive(path) is expected, sensitive_reason(path)

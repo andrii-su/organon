@@ -9,6 +9,8 @@ from typing import Any
 
 import pyarrow as pa
 
+from ai.common.sensitive import is_sensitive
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_DB_PATH = "~/.organon/vectors"
@@ -86,7 +88,13 @@ def embed_text(text: str) -> list[float]:
 
 
 def index_file(path: str, text: str, content_hash: str, db_path: str | None = None) -> None:
-    """Embed and store a file. Skips only when this path already has this hash."""
+    """Embed and store a file. Skips only when this path already has this hash.
+
+    Sensitive files are never stored, whatever the caller passes.
+    """
+    if is_sensitive(path):
+        logger.debug("index_file: sensitive, not stored: %s", path)
+        return
     table = _get_table(db_path)
 
     # Skip if this exact path is already indexed with the same hash. Identical

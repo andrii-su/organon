@@ -180,7 +180,32 @@ fn path_query_hint(path: &str) -> String {
         .unwrap_or_else(|| path.to_string())
 }
 
+/// First `max_chars` characters of a text file; never the content of a
+/// sensitive file, which must not reach the agent.
 fn file_excerpt(path: &str, max_chars: usize) -> Option<String> {
+    if organon_core::sensitive::is_sensitive(std::path::Path::new(path)) {
+        return None;
+    }
     let text = std::fs::read_to_string(path).ok()?;
     Some(text.chars().take(max_chars).collect())
+}
+
+#[cfg(test)]
+mod excerpt_tests {
+    use super::file_excerpt;
+
+    #[test]
+    fn file_excerpt_never_returns_sensitive_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let secret = dir.path().join("prod.env");
+        let plain = dir.path().join("main.py");
+        std::fs::write(&secret, "API_KEY=s3cr3t\n").unwrap();
+        std::fs::write(&plain, "print(1)\n").unwrap();
+
+        assert_eq!(file_excerpt(secret.to_str().unwrap(), 100), None);
+        assert_eq!(
+            file_excerpt(plain.to_str().unwrap(), 5).as_deref(),
+            Some("print")
+        );
+    }
 }

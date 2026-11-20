@@ -4,6 +4,8 @@ import logging
 import mimetypes
 from pathlib import Path
 
+from ai.common.sensitive import is_sensitive
+
 logger = logging.getLogger(__name__)
 
 # Code extensions treated as plain text
@@ -50,7 +52,13 @@ MAX_CHARS = 32_000  # ~8k tokens — enough for embeddings
 
 
 def extract_text(path: str) -> str | None:
-    """Extract text content from a file. Returns None if not extractable."""
+    """Extract text content from a file. Returns None if not extractable.
+
+    Sensitive files (secrets, keys) are never read; see ai.common.sensitive.
+    """
+    if is_sensitive(path):
+        logger.debug("sensitive, not extracted: %s", path)
+        return None
     p = Path(path)
     if not p.exists() or not p.is_file():
         logger.debug("not found or not a file: %s", path)

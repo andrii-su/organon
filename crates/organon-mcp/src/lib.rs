@@ -1399,6 +1399,9 @@ impl McpService {
     pub fn get_file_content(&self, path: &str) -> Result<FileContent> {
         let path = normalize_request_path(path);
         self.ensure_in_scope(&path)?;
+        if organon_core::sensitive::is_sensitive(Path::new(&path)) {
+            bail!("content withheld: {path} is a sensitive file (secrets or keys)");
+        }
         let output = self.python_bridge(&serde_json::json!({
             "op": "extract_text",
             "path": path,
@@ -2242,7 +2245,12 @@ fn path_scope_hint(path: &str) -> String {
     }
 }
 
+/// First `max_chars` characters of a text file; never the content of a
+/// sensitive file, which must not reach the agent.
 fn file_excerpt(path: &str, max_chars: usize) -> Option<String> {
+    if organon_core::sensitive::is_sensitive(std::path::Path::new(path)) {
+        return None;
+    }
     let text = std::fs::read_to_string(path).ok()?;
     Some(text.chars().take(max_chars).collect())
 }
@@ -2329,6 +2337,23 @@ mod tests {
         let mut config = OrgConfig::default();
         config.indexer.db_path = path.display().to_string();
         (McpService::new(path, config), graph, file)
+    }
+
+    #[test]
+    fn get_file_content_refuses_sensitive_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(dir.path()).unwrap();
+        let secret = root.join("prod.env");
+        std::fs::write(&secret, "API_KEY=zzz\n").unwrap();
+        let (svc, _graph, _db) = temp_scoped_service(root.to_str().unwrap());
+
+        let err = svc
+            .get_file_content(secret.to_str().unwrap())
+            .unwrap_err()
+            .to_string();
+
+        assert!(err.contains("sensitive"), "{err}");
+        assert!(!err.contains("zzz"), "{err}");
     }
 
     fn temp_scoped_service(scope: &str) -> (McpService, Graph, NamedTempFile) {
@@ -3017,6 +3042,26 @@ mod freshness_target_tests {
         assert_eq!(
             freshness_targets(&p("/w"), &[p("/w/a"), p("/w/a/sub")]),
             vec![(p("/w/a"), p("/w/a"))]
+        );
+    }
+}
+
+#[cfg(test)]
+mod excerpt_tests {
+    use super::file_excerpt;
+
+    #[test]
+    fn file_excerpt_never_returns_sensitive_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let secret = dir.path().join("prod.env");
+        let plain = dir.path().join("main.py");
+        std::fs::write(&secret, "API_KEY=s3cr3t\n").unwrap();
+        std::fs::write(&plain, "print(1)\n").unwrap();
+
+        assert_eq!(file_excerpt(secret.to_str().unwrap(), 100), None);
+        assert_eq!(
+            file_excerpt(plain.to_str().unwrap(), 5).as_deref(),
+            Some("print")
         );
     }
 }

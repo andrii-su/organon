@@ -836,3 +836,161 @@ fn history_limit_respected() {
     assert!(all.len() > 3);
     assert_eq!(limited.len(), 3);
 }
+
+fn count(db: &NamedTempFile, sql: &str) -> i64 {
+    rusqlite::Connection::open(db.path())
+        .unwrap()
+        .query_row(sql, [], |row| row.get(0))
+        .unwrap()
+}
+
+#[test]
+fn sensitive_file_content_is_never_stored() {
+    let (graph, db) = temp_graph();
+    let dir = tempfile::tempdir().unwrap();
+    let path = std::fs::canonicalize(dir.path()).unwrap().join("prod.env");
+    std::fs::write(&path, "API_KEY=one\n").unwrap();
+    graph
+        .upsert(&Entity::from_path(path.to_str().unwrap()).unwrap())
+        .unwrap();
+    std::fs::write(&path, "API_KEY=two\n").unwrap();
+    graph
+        .upsert(&Entity::from_path(path.to_str().unwrap()).unwrap())
+        .unwrap();
+    graph
+        .update_fts(path.to_str().unwrap(), "prod.env", "API_KEY=two")
+        .unwrap();
+
+    assert_eq!(count(&db, "SELECT COUNT(*) FROM file_snapshots"), 0);
+    assert_eq!(
+        count(
+            &db,
+            "SELECT COUNT(*) FROM entity_history
+             WHERE text_change IS NOT NULL OR before_text IS NOT NULL"
+        ),
+        0
+    );
+    assert_eq!(count(&db, "SELECT COUNT(*) FROM entities_fts"), 0);
+    // the file itself stays in the graph, only its content is withheld
+    assert!(graph.get_by_path(path.to_str().unwrap()).unwrap().is_some());
+}
+
+#[test]
+fn purge_removes_content_stored_before_a_path_was_sensitive() {
+    let (graph, db) = temp_graph();
+    let dir = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let keep = root.join("notes.txt");
+    let leaked = root.join("leaked.txt");
+    for path in [&keep, &leaked] {
+        std::fs::write(path, "v1\n").unwrap();
+        graph
+            .upsert(&Entity::from_path(path.to_str().unwrap()).unwrap())
+            .unwrap();
+        std::fs::write(path, "v2\n").unwrap();
+        graph
+            .upsert(&Entity::from_path(path.to_str().unwrap()).unwrap())
+            .unwrap();
+        graph.update_fts(path.to_str().unwrap(), "x", "v2").unwrap();
+    }
+    // Simulate rows written by an older version for a path now sensitive.
+    let secret = root.join("example.env");
+    let conn = rusqlite::Connection::open(db.path()).unwrap();
+    for table in ["entities", "entity_history", "entities_fts"] {
+        conn.execute(
+            &format!("UPDATE {table} SET path = ?1 WHERE path = ?2"),
+            [secret.to_str().unwrap(), leaked.to_str().unwrap()],
+        )
+        .unwrap();
+    }
+    conn.execute(
+        "INSERT INTO entity_history_archive
+           (id, entity_id, path, event, recorded_at, text_change)
+         VALUES (999, 'x', ?1, 'modified', 1, 'old secret')",
+        [secret.to_str().unwrap()],
+    )
+    .unwrap();
+    let snapshots_before = count(&db, "SELECT COUNT(*) FROM file_snapshots");
+
+    assert!(graph.purge_sensitive_content().unwrap() > 0);
+    assert_eq!(graph.purge_sensitive_content().unwrap(), 0, "idempotent");
+
+    assert_eq!(
+        count(&db, "SELECT COUNT(*) FROM file_snapshots"),
+        snapshots_before - 1
+    );
+    let leftover = format!(
+        "SELECT
+           (SELECT COUNT(*) FROM entity_history WHERE path = '{0}'
+              AND (text_change IS NOT NULL OR before_text IS NOT NULL))
+         + (SELECT COUNT(*) FROM entity_history_archive WHERE path = '{0}' AND text_change IS NOT NULL)
+         + (SELECT COUNT(*) FROM entities_fts WHERE path = '{0}')",
+        secret.display()
+    );
+    assert_eq!(count(&db, &leftover), 0);
+    // non-sensitive content is untouched
+    let kept = format!(
+        "SELECT COUNT(*) FROM entities_fts WHERE path = '{}'",
+        keep.display()
+    );
+    assert_eq!(count(&db, &kept), 1);
+    assert!(graph
+        .get_history(keep.to_str().unwrap(), 10)
+        .unwrap()
+        .iter()
+        .any(|entry| entry.text_change.is_some()));
+}
+
+#[test]
+fn purge_follows_entity_renamed_to_sensitive_name() {
+    let (graph, db) = temp_graph();
+    let dir = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let notes = root.join("notes.txt");
+    std::fs::write(&notes, "token=one\n").unwrap();
+    graph
+        .upsert(&Entity::from_path(notes.to_str().unwrap()).unwrap())
+        .unwrap();
+    std::fs::write(&notes, "token=two\n").unwrap();
+    graph
+        .upsert(&Entity::from_path(notes.to_str().unwrap()).unwrap())
+        .unwrap();
+    // The file becomes prod.env; older history rows keep the benign path.
+    let secret = root.join("prod.env");
+    std::fs::rename(&notes, &secret).unwrap();
+    graph
+        .rename_entity(notes.to_str().unwrap(), secret.to_str().unwrap())
+        .unwrap();
+    assert!(
+        count(
+            &db,
+            "SELECT COUNT(*) FROM entity_history WHERE text_change IS NOT NULL"
+        ) > 0
+    );
+
+    graph.purge_sensitive_content().unwrap();
+
+    assert_eq!(
+        count(
+            &db,
+            "SELECT COUNT(*) FROM entity_history
+             WHERE text_change IS NOT NULL OR before_text IS NOT NULL"
+        ),
+        0
+    );
+    assert_eq!(count(&db, "SELECT COUNT(*) FROM file_snapshots"), 0);
+}
+
+#[test]
+fn purge_drops_snapshots_of_deleted_entities() {
+    let (graph, db) = temp_graph();
+    let conn = rusqlite::Connection::open(db.path()).unwrap();
+    conn.execute(
+        "INSERT INTO file_snapshots(entity_id, content_hash, content) VALUES ('gone', 'h', 'x')",
+        [],
+    )
+    .unwrap();
+
+    assert_eq!(graph.purge_sensitive_content().unwrap(), 1);
+    assert_eq!(count(&db, "SELECT COUNT(*) FROM file_snapshots"), 0);
+}
