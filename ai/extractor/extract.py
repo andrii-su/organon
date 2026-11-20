@@ -57,7 +57,7 @@ def extract_text(path: str) -> str | None:
     Sensitive files (secrets, keys) are never read; see ai.common.sensitive.
     """
     if is_sensitive(path):
-        logger.debug("sensitive, not extracted: %s", path)
+        logger.debug("sensitive file detected, not extracted")
         return None
     p = Path(path)
     if not p.exists() or not p.is_file():
