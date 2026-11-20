@@ -440,24 +440,7 @@ fn do_rename(old: &Path, new: &Path, graph: &Arc<Mutex<Graph>>, use_git_timestam
 /// failure.
 fn on_disk(path: &Path) -> Option<std::fs::FileType> {
     let file_type = std::fs::symlink_metadata(path).ok()?.file_type();
-    let (Some(name), Some(parent)) = (path.file_name(), path.parent()) else {
-        return Some(file_type);
-    };
-    let Ok(entries) = std::fs::read_dir(parent) else {
-        return Some(file_type);
-    };
-    let wanted = name.to_string_lossy().to_lowercase();
-    let mut case_variant = false;
-    for entry in entries.flatten() {
-        let entry_name = entry.file_name();
-        if entry_name == name {
-            return Some(file_type);
-        }
-        if entry_name.to_string_lossy().to_lowercase() == wanted {
-            case_variant = true;
-        }
-    }
-    if case_variant {
+    if crate::freshness::only_case_variant(path) {
         None
     } else {
         Some(file_type)
