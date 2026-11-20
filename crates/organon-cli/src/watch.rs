@@ -17,7 +17,7 @@ use organon_core::{
     config::{HistoryConfig, OrgConfig},
     graph::Graph,
     ignore::IgnoreSet,
-    scanner,
+    scanner, LockRecover,
 };
 
 use crate::format::format_ts;
@@ -89,6 +89,30 @@ pub(crate) fn cmd_watch(
     );
     let graph = Arc::new(Mutex::new(Graph::open(db_path.to_str().unwrap())?));
 
+    // Reconcile before the full scan: files moved while no watcher ran are
+    // still "new" here and get paired with their old entities by content
+    // hash (keeping id, history and relationships); after the scan they
+    // would already have fresh entities. It also removes entities for files
+    // deleted in the meantime, which the upsert-only scan never does.
+    // An empty DB (first start) has nothing to repair; the scan indexes it.
+    let has_entities = graph.lock_recover().entity_count().unwrap_or(0) > 0;
+    for root in watch_roots.iter().filter(|_| has_entities) {
+        match organon_core::freshness::reconcile(
+            &graph,
+            &root.path,
+            &root.ignore_set,
+            config.watch.use_git_timestamps,
+        ) {
+            Ok(s) if s.removed + s.renamed > 0 => eprintln!(
+                "reconciled {}: {} renamed, {} removed",
+                root.path.display(),
+                s.renamed,
+                s.removed
+            ),
+            Ok(_) => {}
+            Err(e) => eprintln!("warning: reconcile failed for {}: {e}", root.path.display()),
+        }
+    }
     let mut stats = organon_core::scanner::ScanStats {
         total: 0,
         indexed: 0,
@@ -122,6 +146,18 @@ pub(crate) fn cmd_watch(
             }
         }
     }
+
+    let _reconcile_handle = (config.watch.reconcile_interval_secs > 0).then(|| {
+        organon_core::freshness::schedule_reconcile(
+            Arc::clone(&graph),
+            watch_roots
+                .iter()
+                .map(|r| (r.path.clone(), Arc::clone(&r.ignore_set)))
+                .collect(),
+            Duration::from_secs(config.watch.reconcile_interval_secs),
+            config.watch.use_git_timestamps,
+        )
+    });
 
     scanner::refresh_lifecycle(Arc::clone(&graph), &config.lifecycle)?;
     archive_history(Arc::clone(&graph), &config.history)?;
