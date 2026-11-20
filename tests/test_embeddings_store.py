@@ -134,3 +134,15 @@ def test_model_is_initialized_once_under_concurrent_calls(monkeypatch):
 
     assert constructor_calls == 1
     assert all(result is model for result in models)
+
+
+def test_index_file_never_stores_sensitive_files(monkeypatch):
+    table = FakeTable()
+    monkeypatch.setattr(store, "_get_table", lambda _db_path: table)
+    monkeypatch.setattr(
+        store, "embed_text", lambda _text: pytest.fail("sensitive file must not be embedded")
+    )
+
+    store.index_file("/repo/prod.env", "API_KEY=zzz", "h", db_path="unused")
+
+    assert table.added == []

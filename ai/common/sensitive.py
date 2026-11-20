@@ -13,6 +13,7 @@ from pathlib import Path
 DEFAULT_SENSITIVE_PATTERNS: tuple[str, ...] = (
     ".env",
     ".env.*",
+    "*.env",  # prod.env, .local.env
     "*.pem",
     "*.key",
     "*.p12",
@@ -23,16 +24,22 @@ DEFAULT_SENSITIVE_PATTERNS: tuple[str, ...] = (
     "*.cer",
     "*.asc",  # GPG armored
     "*.gpg",  # GPG binary
-    "id_rsa",
-    "id_rsa.*",
-    "id_ed25519",
-    "id_ed25519.*",
-    "id_ecdsa",
-    "id_ecdsa.*",
-    "id_dsa",
-    "id_dsa.*",
+    "id_rsa*",  # id_rsa, id_rsa.pub, id_rsa_github
+    "id_ed25519*",
+    "id_ecdsa*",
+    "id_dsa*",
     ".netrc",
+    ".envrc",
+    ".pgpass",
+    ".npmrc",
+    ".pypirc",
+    ".git-credentials",
     "credentials",
+    "credentials.*",
+    "*credentials*.json",
+    "client_secret*.json",  # Google OAuth client
+    "service_account*.json",
+    "service-account*.json",
     "secrets.json",
     "secrets.yaml",
     "secrets.yml",
@@ -45,6 +52,15 @@ DEFAULT_SENSITIVE_PATTERNS: tuple[str, ...] = (
     "*.secret",
     "htpasswd",
     ".htpasswd",
+    "*.tfstate",  # Terraform state stores resource secrets in plain text
+    "*.tfstate.*",
+    "*.tfvars",
+) + tuple(
+    # "secret"/"credential" in the name of a config or text file; code such as
+    # secret_manager.py stays indexable.
+    f"*{word}*.{ext}"
+    for word in ("secret", "credential")
+    for ext in ("json", "yaml", "yml", "toml", "ini", "conf", "cfg", "txt", "properties", "xml")
 )
 
 # Directory components that indicate sensitive areas.
@@ -53,6 +69,8 @@ SENSITIVE_DIRS: frozenset[str] = frozenset(
         ".ssh",
         ".gnupg",
         ".aws",
+        ".kube",
+        ".docker",
         ".config/gcloud",
         "secrets",  # common convention
     }

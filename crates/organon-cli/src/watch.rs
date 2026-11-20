@@ -88,6 +88,10 @@ pub(crate) fn cmd_watch(
         db_path.display()
     );
     let graph = Arc::new(Mutex::new(Graph::open(db_path.to_str().unwrap())?));
+    // Drop content stored for sensitive files before a pattern covered them.
+    if let Err(e) = graph.lock_recover().purge_sensitive_content() {
+        eprintln!("warning: sensitive content purge failed: {e}");
+    }
 
     // Reconcile before the full scan: files moved while no watcher ran are
     // still "new" here and get paired with their old entities by content

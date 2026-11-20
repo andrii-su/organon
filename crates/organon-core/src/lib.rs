@@ -7,6 +7,7 @@ pub mod ignore;
 pub mod lifecycle;
 pub mod python;
 pub mod scanner;
+pub mod sensitive;
 pub mod watcher;
 pub mod workspace;
 

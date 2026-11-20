@@ -1020,14 +1020,106 @@ impl Graph {
     // ── FTS5 ──────────────────────────────────────────────────────────────────
 
     /// Update FTS index for a file after text extraction.
+    /// Sensitive files (see [`crate::sensitive`]) are never stored.
     pub fn update_fts(&self, path: &str, name: &str, content: &str) -> Result<()> {
         self.conn
             .execute("DELETE FROM entities_fts WHERE path = ?1", params![path])?;
+        if crate::sensitive::is_sensitive(Path::new(path)) {
+            return Ok(());
+        }
         self.conn.execute(
             "INSERT INTO entities_fts(path, name, content) VALUES (?1, ?2, ?3)",
             params![path, name, truncate_on_char_boundary(content, 4000)],
         )?;
         Ok(())
+    }
+
+    /// Remove stored content of sensitive files: snapshots, history text and
+    /// FTS rows. Paths, hashes and history events are kept. Cleans up content
+    /// stored before a pattern covered the file (or by older versions).
+    ///
+    /// Matches by path, by `old_path` and by entity id, so content recorded
+    /// under a benign name before a rename to `prod.env` is removed too.
+    /// Snapshots of entities that no longer exist are dropped as well.
+    /// Returns the number of rows changed.
+    pub fn purge_sensitive_content(&self) -> Result<usize> {
+        let extra = std::env::var(crate::sensitive::EXTRA_ENV).ok();
+        let mut sensitive = std::collections::HashSet::new();
+        for sql in [
+            "SELECT DISTINCT path FROM entities",
+            "SELECT DISTINCT path FROM entity_history",
+            "SELECT DISTINCT old_path FROM entity_history WHERE old_path IS NOT NULL",
+            "SELECT DISTINCT path FROM entity_history_archive",
+            "SELECT DISTINCT old_path FROM entity_history_archive WHERE old_path IS NOT NULL",
+            "SELECT DISTINCT path FROM entities_fts",
+        ] {
+            let mut stmt = self.conn.prepare(sql)?;
+            let mut rows = stmt.query([])?;
+            while let Some(row) = rows.next()? {
+                let path: String = row.get(0)?;
+                if crate::sensitive::is_sensitive_stored_path(Path::new(&path), extra.as_deref()) {
+                    sensitive.insert(path);
+                }
+            }
+        }
+
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute_batch(
+            "CREATE TEMP TABLE IF NOT EXISTS purge_paths(path TEXT PRIMARY KEY);
+             CREATE TEMP TABLE IF NOT EXISTS purge_ids(id TEXT PRIMARY KEY);
+             DELETE FROM purge_paths; DELETE FROM purge_ids;",
+        )?;
+        {
+            let mut insert = tx.prepare("INSERT OR IGNORE INTO purge_paths(path) VALUES (?1)")?;
+            for path in &sensitive {
+                insert.execute(params![path])?;
+            }
+        }
+        tx.execute_batch(
+            "INSERT OR IGNORE INTO purge_ids(id)
+               SELECT id FROM entities WHERE path IN (SELECT path FROM purge_paths)
+               UNION SELECT entity_id FROM entity_history
+                 WHERE path IN (SELECT path FROM purge_paths)
+                    OR old_path IN (SELECT path FROM purge_paths)
+               UNION SELECT entity_id FROM entity_history_archive
+                 WHERE path IN (SELECT path FROM purge_paths)
+                    OR old_path IN (SELECT path FROM purge_paths);",
+        )?;
+        let mut changed = tx.execute(
+            "DELETE FROM file_snapshots
+             WHERE entity_id IN (SELECT id FROM purge_ids)
+                OR entity_id NOT IN (SELECT id FROM entities)",
+            [],
+        )?;
+        changed += tx.execute(
+            "UPDATE entity_history SET text_change = NULL, before_text = NULL
+             WHERE (text_change IS NOT NULL OR before_text IS NOT NULL)
+               AND (entity_id IN (SELECT id FROM purge_ids)
+                    OR path IN (SELECT path FROM purge_paths)
+                    OR old_path IN (SELECT path FROM purge_paths))",
+            [],
+        )?;
+        changed += tx.execute(
+            "UPDATE entity_history_archive SET text_change = NULL
+             WHERE text_change IS NOT NULL
+               AND (entity_id IN (SELECT id FROM purge_ids)
+                    OR path IN (SELECT path FROM purge_paths)
+                    OR old_path IN (SELECT path FROM purge_paths))",
+            [],
+        )?;
+        changed += tx.execute(
+            "DELETE FROM entities_fts WHERE path IN (SELECT path FROM purge_paths)",
+            [],
+        )?;
+        tx.execute_batch("DROP TABLE purge_paths; DROP TABLE purge_ids;")?;
+        tx.commit()?;
+        if changed > 0 {
+            info!(
+                "purged stored content of sensitive files: {changed} row(s), {} path(s)",
+                sensitive.len()
+            );
+        }
+        Ok(changed)
     }
 
     /// Full-text search. Returns (path, rank) pairs sorted by relevance.
@@ -1361,7 +1453,6 @@ fn capture_text(entity: &Entity) -> Option<String> {
         return None;
     }
     let path = Path::new(&entity.path);
-    let name = path.file_name()?.to_string_lossy().to_lowercase();
     let extension = path
         .extension()
         .and_then(|value| value.to_str())
@@ -1375,28 +1466,7 @@ fn capture_text(entity: &Entity) -> Option<String> {
     {
         return None;
     }
-    if name == ".env"
-        || name.starts_with(".env.")
-        || name == ".netrc"
-        || name == ".htpasswd"
-        || name.starts_with("id_rsa")
-        || name.starts_with("id_ed25519")
-        || name.starts_with("id_ecdsa")
-        || name.contains("secret")
-        || name.contains("credential")
-        || [
-            "pem", "key", "p12", "pfx", "jks", "keystore", "asc", "gpg", "token",
-        ]
-        .iter()
-        .any(|extension| name.ends_with(&format!(".{extension}")))
-        || path.components().any(|component| {
-            [".ssh", ".aws", ".gnupg", "secrets"]
-                .contains(&component.as_os_str().to_str().unwrap_or(""))
-        })
-        || std::env::var("ORGANON_SENSITIVE_EXTRA")
-            .ok()
-            .is_some_and(|patterns| extra_sensitive_match(&name, &patterns))
-    {
+    if crate::sensitive::is_sensitive(path) {
         return None;
     }
     let bytes = std::fs::read(path).ok()?;
@@ -1407,14 +1477,6 @@ fn capture_text(entity: &Entity) -> Option<String> {
         return None;
     }
     String::from_utf8(bytes).ok()
-}
-
-fn extra_sensitive_match(name: &str, patterns: &str) -> bool {
-    patterns.split(':').any(|pattern| {
-        globset::Glob::new(&pattern.trim().to_lowercase())
-            .ok()
-            .is_some_and(|glob| glob.compile_matcher().is_match(name))
-    })
 }
 
 fn text_change(before: &str, after: &str) -> TextChange {
@@ -1568,13 +1630,6 @@ mod tests {
     use super::*;
     use crate::entity::{Entity, LifecycleState};
     use tempfile::NamedTempFile;
-
-    #[test]
-    fn extra_sensitive_patterns_match_filename() {
-        assert!(extra_sensitive_match("vault.json", "vault.json:*.secret"));
-        assert!(extra_sensitive_match("token.secret", "vault.json:*.secret"));
-        assert!(!extra_sensitive_match("readme.md", "vault.json:*.secret"));
-    }
 
     fn tmp_graph() -> (Graph, NamedTempFile) {
         let f = NamedTempFile::new().unwrap();
