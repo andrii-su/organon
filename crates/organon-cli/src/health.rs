@@ -17,6 +17,7 @@ pub(crate) struct HealthReport {
     relations: usize,
     vectors_exists: bool,
     vectors_count: Option<usize>,
+    vector_coverage: Option<python::VectorCoverage>,
     freshness: Option<DiffReport>,
     status: String,
     notes: Vec<String>,
@@ -37,6 +38,7 @@ pub(crate) fn cmd_health(
         relations: 0,
         vectors_exists,
         vectors_count: None,
+        vector_coverage: None,
         freshness: None,
         status: "ok".to_string(),
         notes: Vec::new(),
@@ -73,19 +75,28 @@ pub(crate) fn cmd_health(
         report.freshness = Some(diff);
 
         if report.vectors_exists {
-            match python::vector_count_with_env(db_path, Some(&canonical_root), &python_env(config))
-            {
-                Ok(count) => {
-                    report.vectors_count = Some(count);
-                    if count < report.entities && report.status == "ok" {
+            match python::vector_coverage_with_env(
+                db_path,
+                Some(&canonical_root),
+                &python_env(config),
+            ) {
+                Ok(coverage) => {
+                    report.vectors_count = Some(coverage.vectors);
+                    report.vector_coverage = Some(coverage);
+                    report.notes.extend(coverage_notes(&coverage));
+                    if coverage.pending > 0 && report.status == "ok" {
                         report.status = "warn".to_string();
-                        report.notes.push(format!(
-                            "vector coverage is incomplete: {count}/{} entities",
-                            report.entities
-                        ));
                     }
                 }
-                Err(e) => report.notes.push(format!("vector stats unavailable: {e}")),
+                Err(e) => {
+                    if report.status == "ok" {
+                        report.status = "warn".to_string();
+                    }
+                    report.notes.push(format!(
+                        "vector coverage unavailable (update the Python layer if it is \
+                         older than this CLI): {e}"
+                    ));
+                }
             }
         }
     }
@@ -269,6 +280,26 @@ fn doctor_check(label: &str, ok: bool, detail: &str, extra: &str) {
     }
 }
 
+/// Notes for `organon health`: pending files are a problem, files the indexer
+/// never embeds (empty, binary, sensitive, ignored) are only informational.
+fn coverage_notes(coverage: &python::VectorCoverage) -> Vec<String> {
+    let mut notes = Vec::new();
+    if coverage.pending > 0 {
+        notes.push(format!(
+            "vector coverage is incomplete: {} file(s) with text have no vector; \
+             run `organon index` or keep `organon watch` running",
+            coverage.pending
+        ));
+    }
+    if coverage.not_embeddable > 0 {
+        notes.push(format!(
+            "{} empty, binary, sensitive or ignored file(s) have no vector (expected)",
+            coverage.not_embeddable
+        ));
+    }
+    notes
+}
+
 #[cfg(test)]
 mod tests {
     use organon_core::{config::OrgConfig, graph::Graph};
@@ -295,5 +326,41 @@ mod tests {
             result.is_ok(),
             "doctor should return Ok even with degraded state"
         );
+    }
+
+    fn coverage(vectors: usize, pending: usize, not_embeddable: usize) -> python::VectorCoverage {
+        python::VectorCoverage {
+            vectors,
+            pending,
+            not_embeddable,
+        }
+    }
+
+    #[test]
+    fn coverage_notes_full_coverage_is_silent() {
+        assert!(coverage_notes(&coverage(10, 0, 0)).is_empty());
+    }
+
+    #[test]
+    fn coverage_notes_not_embeddable_files_are_informational() {
+        let notes = coverage_notes(&coverage(720, 0, 61));
+        assert_eq!(notes.len(), 1);
+        assert!(notes[0].contains("61 empty, binary"), "{notes:?}");
+        assert!(!notes[0].contains("incomplete"), "{notes:?}");
+    }
+
+    #[test]
+    fn coverage_notes_pending_files_are_reported() {
+        let notes = coverage_notes(&coverage(700, 3, 0));
+        assert_eq!(notes.len(), 1);
+        assert!(notes[0].starts_with("vector coverage is incomplete: 3 file(s)"));
+    }
+
+    #[test]
+    fn vector_coverage_parses_indexer_json() {
+        let parsed: python::VectorCoverage =
+            serde_json::from_str(r#"{"vectors": 720, "pending": 0, "not_embeddable": 61}"#)
+                .unwrap();
+        assert_eq!(parsed, coverage(720, 0, 61));
     }
 }

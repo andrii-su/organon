@@ -1,5 +1,7 @@
 """Tests for ai/indexer.py — run_once logic."""
+import os
 import sqlite3
+from contextlib import closing
 from pathlib import Path
 from unittest.mock import patch
 
@@ -7,12 +9,14 @@ import pytest
 
 from ai.embeddings.store import EMBED_DIM, _get_table, get_all_entries
 from ai.indexer import (
+    _readable_file,
     get_entities,
     health_line,
     prune_fts,
     prune_vectors,
     reconcile_lancedb_paths,
     run_once,
+    vector_coverage,
 )
 
 # ── fixtures ──────────────────────────────────────────────────────────────────
@@ -588,3 +592,156 @@ def test_run_once_empty_db(tmp_path, monkeypatch):
     stats = run_once(db)
     assert stats["total"] == 0
     assert stats["indexed"] == 0
+
+
+# ── vector coverage / no-text cache ───────────────────────────────────────────
+
+def test_vector_coverage_counts_files_without_text_as_not_embeddable(tmp_db):
+    with (
+        patch(
+            "ai.indexer.get_all_entries",
+            return_value=[{"path": "/src/main.py", "content_hash": "hash_main"}],
+        ),
+        patch("ai.indexer.extract_text", return_value=None) as mock_extract,
+    ):
+        cov = vector_coverage(tmp_db)
+
+    assert cov == {"vectors": 1, "pending": 0, "not_embeddable": 1}
+    # only the file without a vector is read
+    assert [c.args[0] for c in mock_extract.call_args_list] == ["/src/utils.py"]
+
+
+def test_vector_coverage_reports_text_files_without_vectors_as_pending(tmp_db):
+    with (
+        patch("ai.indexer.get_all_entries", return_value=[]),
+        patch("ai.indexer.extract_text", return_value="def f(): pass"),
+    ):
+        cov = vector_coverage(tmp_db)
+
+    assert cov == {"vectors": 0, "pending": 2, "not_embeddable": 0}
+
+
+def test_vector_coverage_treats_stale_hash_as_pending(tmp_db):
+    with (
+        patch(
+            "ai.indexer.get_all_entries",
+            return_value=[
+                {"path": "/src/main.py", "content_hash": "old_hash"},
+                {"path": "/src/utils.py", "content_hash": "hash_utils"},
+            ],
+        ),
+        patch("ai.indexer.extract_text", return_value="x = 1"),
+    ):
+        cov = vector_coverage(tmp_db)
+
+    assert cov == {"vectors": 2, "pending": 1, "not_embeddable": 0}
+
+
+def test_vector_coverage_does_not_read_sensitive_files(tmp_db):
+    with (
+        patch("ai.indexer.get_all_entries", return_value=[]),
+        patch("ai.indexer.is_sensitive", side_effect=lambda p: p == "/src/utils.py"),
+        patch("ai.indexer.extract_text", return_value="x = 1") as mock_extract,
+    ):
+        cov = vector_coverage(tmp_db)
+
+    assert cov == {"vectors": 0, "pending": 1, "not_embeddable": 1}
+    assert "/src/utils.py" not in [c.args[0] for c in mock_extract.call_args_list]
+
+
+def test_vector_coverage_scopes_to_path_prefix(tmp_db):
+    with (
+        patch(
+            "ai.indexer.get_all_entries",
+            return_value=[
+                {"path": "/src/main.py", "content_hash": "hash_main"},
+                {"path": "/other/x.py", "content_hash": "h"},
+            ],
+        ),
+        patch("ai.indexer.extract_text", return_value="x = 1"),
+    ):
+        cov = vector_coverage(tmp_db, ["/src"])
+
+    assert cov == {"vectors": 1, "pending": 1, "not_embeddable": 0}
+
+
+def _run_with_cache(tmp_db, cache, readable=True):
+    with (
+        patch("ai.indexer._readable_file", return_value=readable),
+        patch("ai.indexer.extract_text", return_value=None) as mock_extract,
+        patch("ai.indexer.index_file"),
+        patch("ai.indexer.get_all_entries", return_value=[]),
+        patch("ai.indexer.extract_relations", return_value=[]),
+        patch("ai.indexer.upsert_relations"),
+    ):
+        stats = run_once(tmp_db, no_text_cache=cache)
+    return stats, mock_extract.call_count
+
+
+def test_run_once_reads_files_without_text_once_per_content_version(tmp_db):
+    cache: set = set()
+    first, first_reads = _run_with_cache(tmp_db, cache)
+    second, second_reads = _run_with_cache(tmp_db, cache)
+
+    assert first_reads == 2
+    assert second_reads == 0
+    assert first["skipped"] == second["skipped"] == 2
+
+
+def test_run_once_rereads_file_when_content_hash_changes(tmp_db):
+    cache: set = set()
+    _run_with_cache(tmp_db, cache)
+    with closing(sqlite3.connect(str(tmp_db))) as conn:
+        conn.execute("UPDATE entities SET content_hash = 'hash_main_v2' WHERE path = '/src/main.py'")
+        conn.commit()
+
+    _, reads = _run_with_cache(tmp_db, cache)
+
+    assert reads == 1
+
+
+def test_run_once_without_cache_rereads_every_time(tmp_db):
+    _, first_reads = _run_with_cache(tmp_db, None)
+    _, second_reads = _run_with_cache(tmp_db, None)
+
+    assert first_reads == second_reads == 2
+
+
+def test_run_once_drops_cache_entries_for_old_content(tmp_db):
+    cache: set = {("/src/main.py", "old_hash"), ("/gone.py", "h")}
+    _run_with_cache(tmp_db, cache)
+
+    assert cache == {("/src/main.py", "hash_main"), ("/src/utils.py", "hash_utils")}
+
+
+def test_run_once_does_not_cache_unreadable_files(tmp_db):
+    cache: set = set()
+    _run_with_cache(tmp_db, cache, readable=False)
+    _, reads = _run_with_cache(tmp_db, cache, readable=False)
+
+    assert cache == set()
+    assert reads == 2
+
+
+def test_readable_file_accepts_empty_and_binary_files(tmp_path):
+    empty = tmp_path / "__init__.py"
+    empty.write_text("")
+    binary = tmp_path / "logo.png"
+    binary.write_bytes(b"\x89PNG\x00\x01")
+
+    assert _readable_file(str(empty))
+    assert _readable_file(str(binary))
+
+
+def test_readable_file_rejects_missing_unreadable_and_directories(tmp_path):
+    locked = tmp_path / "locked.py"
+    locked.write_text("x = 1")
+    locked.chmod(0)
+    try:
+        if os.access(locked, os.R_OK):
+            pytest.skip("running as a user that ignores file permissions")
+        assert not _readable_file(str(locked))
+    finally:
+        locked.chmod(0o644)
+    assert not _readable_file(str(tmp_path / "missing.py"))
+    assert not _readable_file(str(tmp_path))
