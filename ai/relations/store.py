@@ -10,21 +10,27 @@ from collections import deque
 from contextlib import contextmanager
 from pathlib import Path
 
+from ai.common.paths import default_db
+
 logger = logging.getLogger(__name__)
 
-DB_PATH = Path("~/.organon/entities.db").expanduser()
 _MAX_GRAPH_NODES = 50
 
 
+def _resolve(db_path) -> Path:
+    """The given DB path, else the default (honours ORGANON_HOME / ORGANON_DB)."""
+    return Path(db_path) if db_path else default_db()
+
+
 @contextmanager
-def _db(db_path=DB_PATH):
+def _db(db_path=None):
     """Open a connection, commit on clean exit, and always close it.
 
     sqlite3.Connection's own context manager commits/rolls back but never
     closes, leaking the connection (and its fd). This wrapper guarantees the
     connection is closed even on error.
     """
-    conn = sqlite3.connect(str(db_path))
+    conn = sqlite3.connect(str(_resolve(db_path)))
     conn.row_factory = sqlite3.Row
     try:
         yield conn
@@ -38,7 +44,7 @@ def _db(db_path=DB_PATH):
 
 def upsert_relations(
     relations: list[tuple[str, str, str]],
-    db_path=DB_PATH,
+    db_path=None,
 ) -> None:
     """Batch-upsert (from_path, to_path, kind) triples."""
     if not relations:
@@ -54,7 +60,7 @@ def upsert_relations(
     logger.debug("upsert_relations: %d relations stored", len(relations))
 
 
-def delete_relations_from(path: str, db_path=DB_PATH) -> int:
+def delete_relations_from(path: str, db_path=None) -> int:
     """Delete all outgoing edges from path before re-extracting relations."""
     with _db(db_path) as conn:
         cursor = conn.execute(
@@ -69,7 +75,7 @@ def delete_relations_from(path: str, db_path=DB_PATH) -> int:
 # ── read ──────────────────────────────────────────────────────────────────────
 
 
-def get_relations(path: str, db_path=DB_PATH) -> list[dict]:
+def get_relations(path: str, db_path=None) -> list[dict]:
     """Return all edges where path is source or target."""
     with _db(db_path) as conn:
         rows = conn.execute(
@@ -81,7 +87,7 @@ def get_relations(path: str, db_path=DB_PATH) -> list[dict]:
     return result
 
 
-def get_graph(path: str, depth: int = 1, db_path=DB_PATH) -> dict:
+def get_graph(path: str, depth: int = 1, db_path=None) -> dict:
     """
     BFS from `path` up to `depth` hops. Returns {nodes: [...], edges: [...]}.
     Caps at _MAX_GRAPH_NODES nodes.
