@@ -168,7 +168,7 @@ pub(crate) fn cmd_index(
     if let Some(secs) = watch {
         info!("index watch mode: {secs}s");
     }
-    let invocation = python::indexer_invocation(db_path, watch, &path_prefixes);
+    let invocation = python::indexer_invocation(db_path, watch, &path_prefixes)?;
     python::python_exec_invocation_with_env(&invocation, &python_env(config))
 }
 
