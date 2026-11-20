@@ -182,12 +182,7 @@ pub fn workspace_paths(id: &str) -> WorkspacePaths {
 }
 
 pub fn organon_home() -> PathBuf {
-    std::env::var("ORGANON_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| {
-            let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-            PathBuf::from(home).join(".organon")
-        })
+    crate::config::organon_home()
 }
 
 fn unique_id(existing: &[WorkspaceEntry], name: &str, path: &Path) -> String {

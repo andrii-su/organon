@@ -1509,11 +1509,7 @@ impl McpService {
         if let Ok(path) = std::env::var("ORGANON_QUERIES") {
             return PathBuf::from(path);
         }
-        let home = std::env::var("ORGANON_HOME").unwrap_or_else(|_| {
-            let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-            format!("{home}/.organon")
-        });
-        PathBuf::from(home).join("saved_queries.json")
+        organon_core::config::organon_home().join("saved_queries.json")
     }
 
     /// Invoke the Python AI layer via the argument-safe bridge. The request is

@@ -9,9 +9,10 @@ from typing import Any
 
 import pyarrow as pa
 
+from ai.common.paths import default_vectors
+
 logger = logging.getLogger(__name__)
 
-DEFAULT_DB_PATH = "~/.organon/vectors"
 TABLE_NAME = "entities"
 
 # BAAI/bge-small-en-v1.5 — 384 dims, ~130MB, fast on CPU
@@ -40,7 +41,7 @@ def _get_model():
 
 
 def _resolve_db_path(db_path: str | None = None) -> str:
-    return db_path or os.environ.get("ORGANON_VECTORS_DB", DEFAULT_DB_PATH)
+    return db_path or default_vectors()
 
 
 def _where_equals(column: str, value: str) -> str:

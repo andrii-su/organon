@@ -263,13 +263,26 @@ fn resolve_effective_config(
         .or_else(|| registry.default_workspace());
     if let Some(workspace) = workspace {
         let paths = registry.paths_for(&workspace.id);
-        effective.indexer.db_path = paths.db_path.to_string_lossy().to_string();
-        effective.indexer.vectors_path = paths.vectors_path.to_string_lossy().to_string();
+        let explicit_vectors = std::env::var("ORGANON_VECTORS_DB").is_ok_and(|v| !v.is_empty());
+        apply_workspace_paths(&mut effective, &paths, explicit_vectors);
         return Ok((effective, paths.db_path));
     }
 
     let db_path = PathBuf::from(&effective.indexer.db_path);
     Ok((effective, db_path))
+}
+
+/// Point the config at a workspace's storage. An explicit `ORGANON_VECTORS_DB`
+/// (already applied by `OrgConfig::load`) wins over the workspace's vectors.
+fn apply_workspace_paths(
+    effective: &mut OrgConfig,
+    paths: &organon_core::workspace::WorkspacePaths,
+    explicit_vectors: bool,
+) {
+    effective.indexer.db_path = paths.db_path.to_string_lossy().to_string();
+    if !explicit_vectors {
+        effective.indexer.vectors_path = paths.vectors_path.to_string_lossy().to_string();
+    }
 }
 
 /// Derive a filesystem path hint from the command to look up the active workspace.
@@ -339,12 +352,7 @@ pub(crate) fn open_graph(db_path: &Path) -> Result<Graph> {
 
 /// Return the organon home directory (`~/.organon` or `$ORGANON_HOME`).
 pub(crate) fn organon_home() -> PathBuf {
-    std::env::var("ORGANON_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| {
-            let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-            PathBuf::from(home).join(".organon")
-        })
+    organon_core::config::organon_home()
 }
 
 /// Resolve watch roots from CLI arg and config, deduplicating by canonical path.
@@ -423,6 +431,25 @@ fn parse_date_to_timestamp(date: &str) -> Result<i64> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn workspace_paths_respect_explicit_vectors() {
+        let paths = organon_core::workspace::WorkspacePaths {
+            root: PathBuf::from("/ws"),
+            db_path: PathBuf::from("/ws/entities.db"),
+            vectors_path: PathBuf::from("/ws/vectors"),
+        };
+        let mut cfg = OrgConfig::default();
+        cfg.indexer.vectors_path = "/explicit/vec".to_string();
+
+        let mut explicit = cfg.clone();
+        apply_workspace_paths(&mut explicit, &paths, true);
+        assert_eq!(explicit.indexer.db_path, "/ws/entities.db");
+        assert_eq!(explicit.indexer.vectors_path, "/explicit/vec");
+
+        apply_workspace_paths(&mut cfg, &paths, false);
+        assert_eq!(cfg.indexer.vectors_path, "/ws/vectors");
+    }
+
     use clap::Parser;
 
     use super::*;

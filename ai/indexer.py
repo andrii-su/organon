@@ -21,6 +21,7 @@ from contextlib import closing
 from pathlib import Path
 
 from ai.common.ignore import is_ignored
+from ai.common.paths import default_db
 from ai.common.sensitive import is_sensitive, sensitive_reason
 from ai.embeddings.store import (
     delete_path_from_store,
@@ -35,7 +36,6 @@ from ai.routes.fastapi import discover_routes, replace_route_index
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_DB = Path("~/.organon/entities.db").expanduser()
 PACKAGE_NAME = "organon-ai"
 
 
@@ -366,7 +366,9 @@ def main() -> None:
         action="store_true",
         help="Validate that the indexer module and dependencies can be imported.",
     )
-    parser.add_argument("--db", default=str(DEFAULT_DB), help="SQLite DB path")
+    parser.add_argument(
+        "--db", help="SQLite DB path (default: $ORGANON_DB or $ORGANON_HOME/entities.db)"
+    )
     parser.add_argument(
         "--watch", type=int, metavar="SECONDS", help="Run continuously every N seconds"
     )
@@ -385,7 +387,7 @@ def main() -> None:
         print(health_line())
         return
 
-    db_path = Path(args.db).expanduser()
+    db_path = Path(args.db).expanduser() if args.db else default_db()
     if not db_path.exists():
         logger.error("DB not found: %s (run organon-core first)", db_path)
         return

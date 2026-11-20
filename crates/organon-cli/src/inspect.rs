@@ -272,10 +272,7 @@ pub(crate) fn cmd_archive(
         return Ok(());
     }
 
-    let archive_dir = PathBuf::from(format!(
-        "{}/.organon/archive",
-        std::env::var("HOME").unwrap_or_else(|_| ".".to_string())
-    ));
+    let archive_dir = crate::organon_home().join("archive");
 
     println!(
         "{} archived file(s){}:",
