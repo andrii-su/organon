@@ -31,6 +31,18 @@ ARGS_ENV = "ORGANON_BRIDGE_ARGS"
 def _run(args: dict) -> object:
     op = args.get("op")
     if op == "search":
+        if args.get("graph_db"):
+            from pathlib import Path
+
+            from ai.freshness import search_fresh
+
+            return search_fresh(
+                args["query"],
+                args["limit"],
+                args.get("db_path"),
+                args.get("path_prefix"),
+                Path(args["graph_db"]),
+            )
         from ai.embeddings.store import search
 
         return search(
@@ -41,6 +53,15 @@ def _run(args: dict) -> object:
         )
     if op == "search_by_path":
         from ai.embeddings.store import search_by_path
+
+        if args.get("graph_db"):
+            from pathlib import Path
+
+            from ai.freshness import Refresher
+
+            refresher = Refresher(Path(args["graph_db"]), args.get("db_path"))
+            refresher.refresh_suspects(args.get("path_prefix"))
+            refresher.refresh_candidates([{"path": args["path"]}])
 
         return search_by_path(
             args["path"],
