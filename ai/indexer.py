@@ -29,6 +29,7 @@ from ai.embeddings.store import (
     update_path_in_store,
 )
 from ai.extractor.extract import extract_text
+from ai.freshness import file_hash
 from ai.relations.extract import extract_relations
 from ai.relations.store import delete_relations_from, upsert_relations
 from ai.routes.fastapi import discover_routes, replace_route_index
@@ -269,7 +270,9 @@ def run_once(
     for entity in entities:
         path = entity["path"]
         name = entity["name"]
-        content_hash = entity["content_hash"]
+        # Key the vector by the bytes actually embedded: the graph hash can lag
+        # behind the file, and search refreshes write the disk hash too.
+        content_hash = file_hash(path) or entity["content_hash"]
         needs_vector = (path, content_hash) not in indexed_pairs
         needs_fts = path not in fts_paths
 

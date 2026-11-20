@@ -600,3 +600,58 @@ def test_delete_fts_removes_only_that_path(tmp_db):
     paths = [r[0] for r in conn.execute("SELECT path FROM entities_fts")]
     conn.close()
     assert paths == ["/src/utils.py"]
+
+
+def _disk_entity_db(tmp_path, path, graph_hash):
+    db = tmp_path / "disk.db"
+    conn = sqlite3.connect(str(db))
+    conn.execute(
+        "CREATE TABLE entities (id TEXT, path TEXT, name TEXT, extension TEXT, size_bytes INTEGER, "
+        "created_at INTEGER, modified_at INTEGER, accessed_at INTEGER, lifecycle TEXT, "
+        "content_hash TEXT, summary TEXT)"
+    )
+    conn.execute("CREATE TABLE relationships (from_path TEXT, to_path TEXT, kind TEXT, created_at INTEGER)")
+    conn.execute(
+        "INSERT INTO entities VALUES ('1', ?, 'a.py', '.py', 3, 0, 0, 0, 'active', ?, NULL)",
+        (str(path), graph_hash),
+    )
+    conn.commit()
+    conn.close()
+    return db
+
+
+def test_run_once_stores_disk_hash_when_graph_is_behind(tmp_path):
+    import hashlib
+
+    f = tmp_path / "a.py"
+    f.write_bytes(b"new")
+    db = _disk_entity_db(tmp_path, f, "old")
+    with (
+        patch("ai.indexer.index_file") as mock_index,
+        patch("ai.indexer.get_all_entries", return_value=[]),
+        patch("ai.indexer.extract_relations", return_value=[]),
+        patch("ai.indexer.upsert_relations"),
+        patch("ai.indexer._index_routes"),
+    ):
+        run_once(db)
+
+    assert mock_index.call_args.args[2] == hashlib.sha256(b"new").hexdigest()
+
+
+def test_run_once_skips_when_disk_hash_already_indexed(tmp_path):
+    import hashlib
+
+    f = tmp_path / "a.py"
+    f.write_bytes(b"new")
+    db = _disk_entity_db(tmp_path, f, "old")
+    indexed = [{"path": str(f), "content_hash": hashlib.sha256(b"new").hexdigest()}]
+    with (
+        patch("ai.indexer.index_file") as mock_index,
+        patch("ai.indexer.get_all_entries", return_value=indexed),
+        patch("ai.indexer.extract_relations", return_value=[]),
+        patch("ai.indexer.upsert_relations"),
+        patch("ai.indexer._index_routes"),
+    ):
+        run_once(db)
+
+    assert mock_index.call_count == 0
