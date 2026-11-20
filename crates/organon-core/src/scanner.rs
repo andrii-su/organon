@@ -13,7 +13,7 @@ use crate::graph::Graph;
 use crate::ignore::{is_ignored_default, IgnoreSet};
 use crate::LockRecover;
 
-const MAX_FILE_SIZE: u64 = 100 * 1024 * 1024; // 100 MB
+pub const MAX_FILE_SIZE: u64 = 100 * 1024 * 1024; // 100 MB
 
 pub struct ScanStats {
     pub total: usize,

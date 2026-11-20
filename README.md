@@ -383,6 +383,18 @@ reads active history unless `include_archive=true`; archived entries carry
 for active and archived payload estimates. `organon stats` shows both sizes.
 Archiving is a logical separation and does not shrink the database file.
 
+The watcher reconciles the index with the disk right after its startup scan
+(removing entities for files deleted while it was not running) and then every
+`[watch].reconcile_interval_secs` seconds (default 300, `0` disables), repairing
+any events it missed. MCP tools that depend on index completeness (`get_impact`,
+`get_entity`, `search_files`, `search_similar`, `query_route_files`,
+`graph_stats`) return an `index` field with `status` (`fresh` / `stale` /
+`unknown`) and counts of unindexed, changed and deleted files under the session
+scope; the check uses file metadata only and is cached for 30 seconds.
+`get_impact` adds `warnings` when its result may be incomplete, and `get_entity`
+returns `file_status` (`not_indexed` when the file exists but is missing from the
+index).
+
 ## Development
 
 ```bash

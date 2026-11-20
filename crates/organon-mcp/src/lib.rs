@@ -1,7 +1,8 @@
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use anyhow::{bail, Result};
 use axum::Router;
@@ -10,8 +11,10 @@ use log::debug;
 use organon_core::{
     config::OrgConfig,
     entity::Entity,
+    freshness,
     graph::{entity_matches_filter, FindFilter, Graph},
-    python,
+    ignore::IgnoreSet,
+    python, LockRecover,
 };
 use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
@@ -33,6 +36,11 @@ use serde::{Deserialize, Serialize};
 const MAX_MCP_RESULTS: usize = 100;
 const MAX_MCP_CONTEXT_BUDGET: usize = 100_000;
 const MAX_MCP_GRAPH_DEPTH: u8 = 5;
+/// How long an index freshness check is reused across requests.
+const FRESHNESS_TTL: Duration = Duration::from_secs(30);
+const FRESHNESS_EXAMPLES: usize = 10;
+/// Above this many files the request-path freshness walk gives up ("unknown").
+const FRESHNESS_MAX_FILES: usize = 20_000;
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
@@ -149,6 +157,83 @@ pub struct QueryRouteFilesResponse {
     pub items: Vec<RouteFileCandidate>,
     pub has_more: bool,
     pub coverage_note: String,
+    pub index: IndexFreshness,
+}
+
+/// Whether the index matches the disk under the session scope.
+///
+/// Results from a stale index can be silently incomplete: files missing from
+/// the index never show up as dependents or search hits.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+pub struct IndexFreshness {
+    /// "fresh" | "stale" | "unknown"
+    pub status: String,
+    /// Files on disk that are not indexed.
+    pub new: usize,
+    /// Indexed files that are gone from disk.
+    pub deleted: usize,
+    /// Indexed files whose size or mtime changed since indexing.
+    pub changed: usize,
+    /// Up to 10 differing paths, unindexed files first.
+    pub examples: Vec<String>,
+    pub note: Option<String>,
+}
+
+impl Default for IndexFreshness {
+    fn default() -> Self {
+        Self::unknown("freshness not checked")
+    }
+}
+
+impl IndexFreshness {
+    fn unknown(note: impl Into<String>) -> Self {
+        Self {
+            status: "unknown".to_string(),
+            new: 0,
+            deleted: 0,
+            changed: 0,
+            examples: Vec::new(),
+            note: Some(note.into()),
+        }
+    }
+
+    fn from_drift(drift: &freshness::Drift, scope: &Path) -> Self {
+        if drift.is_fresh() {
+            return Self {
+                status: "fresh".to_string(),
+                new: 0,
+                deleted: 0,
+                changed: 0,
+                examples: Vec::new(),
+                note: None,
+            };
+        }
+        let examples = drift
+            .new
+            .iter()
+            .chain(&drift.changed)
+            .chain(&drift.deleted)
+            .take(FRESHNESS_EXAMPLES)
+            .cloned()
+            .collect();
+        Self {
+            status: "stale".to_string(),
+            new: drift.new.len(),
+            deleted: drift.deleted.len(),
+            changed: drift.changed.len(),
+            examples,
+            note: Some(format!(
+                "{} file(s) differ between disk and index; results may be incomplete. \
+                 The running watcher reconciles periodically; to fix now run `organon watch {}`.",
+                drift.total(),
+                scope.display()
+            )),
+        }
+    }
+
+    pub fn is_stale(&self) -> bool {
+        self.status == "stale"
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -202,6 +287,8 @@ pub struct GraphStats {
     pub total_bytes: u64,
     pub by_lifecycle: BTreeMap<String, usize>,
     pub db_path: String,
+    #[serde(default)]
+    pub index: IndexFreshness,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -227,6 +314,8 @@ pub struct FileContent {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct SearchFilesResponse {
     pub items: Vec<SearchHit>,
+    #[serde(default)]
+    pub index: IndexFreshness,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -254,6 +343,12 @@ pub struct ContextItem {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct GetEntityResponse {
     pub entity: Option<EntityRecord>,
+    /// "indexed" | "not_indexed" (on disk, missing from the index) |
+    /// "changed_since_index" | "missing_on_disk" | "not_found".
+    #[serde(default)]
+    pub file_status: String,
+    #[serde(default)]
+    pub index: IndexFreshness,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -266,6 +361,7 @@ pub struct McpService {
     db_path: PathBuf,
     config: OrgConfig,
     scope: Option<PathBuf>,
+    freshness_cache: Arc<Mutex<Option<(Instant, IndexFreshness)>>>,
 }
 
 #[derive(Clone)]
@@ -360,6 +456,11 @@ pub struct ImpactResponse {
     pub direct_dependents: usize,
     /// "none" | "low" | "medium" | "high" based on total reverse-dep count.
     pub risk_level: String,
+    /// What `risk_level` is computed from, and what it cannot see.
+    pub risk_basis: String,
+    /// Reasons the result may be incomplete (stale index, unindexed target).
+    pub warnings: Vec<String>,
+    pub index: IndexFreshness,
     /// Impact entries, sorted by depth then path. Fields: path, kind, depth.
     pub entries: Vec<serde_json::Value>,
 }
@@ -424,11 +525,7 @@ pub struct BuildContextParams<'a> {
 
 impl McpService {
     pub fn new(db_path: PathBuf, config: OrgConfig) -> Self {
-        Self {
-            db_path,
-            config,
-            scope: None,
-        }
+        Self::new_with_scope(db_path, config, None)
     }
 
     pub fn new_with_scope(db_path: PathBuf, config: OrgConfig, scope: Option<PathBuf>) -> Self {
@@ -436,6 +533,7 @@ impl McpService {
             db_path,
             config,
             scope,
+            freshness_cache: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -660,6 +758,7 @@ impl McpService {
             items: candidates.into_iter().skip(offset).take(limit).collect(),
             has_more,
             coverage_note: "Candidates come from indexed text, stored file relationships, and statically resolved FastAPI routes; dynamic prefixes, unindexed files, or truncated content may be absent.".to_string(),
+            index: self.index_freshness(),
         })
     }
 
@@ -667,6 +766,74 @@ impl McpService {
         let path = normalize_request_path(path);
         self.ensure_in_scope(&path)?;
         self.open_graph()?.get_by_path(&path)
+    }
+
+    /// Entity plus how it relates to the file on disk right now.
+    pub fn get_entity_response(&self, path: &str) -> Result<GetEntityResponse> {
+        let entity = self.get_entity(path)?;
+        let file_status = file_status(
+            &normalize_request_path(path),
+            entity.as_ref(),
+            &self.config,
+            self.scope.as_deref(),
+        );
+        Ok(GetEntityResponse {
+            entity: entity.map(EntityRecord::from),
+            file_status: file_status.to_string(),
+            index: self.index_freshness(),
+        })
+    }
+
+    /// Drift over the parts of `scope` that a watcher indexes.
+    ///
+    /// Only watched roots count: a scope above a watched root (e.g. `~/code`)
+    /// must not report every unwatched project as unindexed. Each part uses
+    /// its watch root's ignore rules (`.organonignore` lives there).
+    fn compute_freshness(&self, scope: &Path) -> IndexFreshness {
+        let graph = match self.open_graph() {
+            Ok(g) => g,
+            Err(e) => return IndexFreshness::unknown(format!("freshness check failed: {e}")),
+        };
+        let known = freshness::known_watch_roots(&self.config.watch.roots);
+        let targets = freshness_targets(scope, &known);
+        if targets.is_empty() {
+            return IndexFreshness::unknown(
+                "session scope is not under any watched root; start `organon watch <path>`",
+            );
+        }
+        let mut drift = freshness::Drift::default();
+        for (walk_root, ignore_root) in targets {
+            let ignore = IgnoreSet::load(&ignore_root, &self.config.watch.ignore_segments);
+            match freshness::quick_drift(
+                &graph,
+                &walk_root,
+                &ignore,
+                self.config.watch.use_git_timestamps,
+                Some(FRESHNESS_MAX_FILES),
+            ) {
+                Ok(d) => drift.extend(d),
+                Err(e) => return IndexFreshness::unknown(format!("freshness check skipped: {e}")),
+            }
+        }
+        IndexFreshness::from_drift(&drift, scope)
+    }
+
+    /// Disk ↔ index drift under the session scope, cached for `FRESHNESS_TTL`.
+    pub fn index_freshness(&self) -> IndexFreshness {
+        let Some(scope) = &self.scope else {
+            return IndexFreshness::unknown(
+                "no session scope; run `organon health <path>` to check a workspace",
+            );
+        };
+        let mut cache = self.freshness_cache.lock_recover();
+        if let Some((at, value)) = cache.as_ref() {
+            if at.elapsed() < FRESHNESS_TTL {
+                return value.clone();
+            }
+        }
+        let value = self.compute_freshness(scope);
+        *cache = Some((Instant::now(), value.clone()));
+        value
     }
 
     pub fn list_by_lifecycle(&self, state: &str, limit: usize) -> Result<Vec<LifecycleRow>> {
@@ -724,6 +891,7 @@ impl McpService {
             total_bytes,
             by_lifecycle,
             db_path: self.db_path.display().to_string(),
+            index: self.index_freshness(),
         })
     }
 
@@ -778,10 +946,36 @@ impl McpService {
             .into_iter()
             .map(|e| serde_json::to_value(e).unwrap_or(serde_json::Value::Null))
             .collect();
+
+        let index = self.index_freshness();
+        let mut warnings = Vec::new();
+        let target = self.open_graph()?.get_by_path(&path)?;
+        match file_status(&path, target.as_ref(), &self.config, self.scope.as_deref()) {
+            "not_indexed" => warnings.push(
+                "target file is on disk but not indexed; its dependents are unknown".to_string(),
+            ),
+            "changed_since_index" => warnings.push(
+                "target file changed since it was indexed; its imports may be outdated".to_string(),
+            ),
+            _ => {}
+        }
+        if index.is_stale() {
+            warnings.push(format!(
+                "index is stale ({} unindexed, {} changed, {} deleted under scope): dependents in \
+                 those files are missing, so total and risk_level may be too low; verify with grep \
+                 before refactoring",
+                index.new, index.changed, index.deleted
+            ));
+        }
         Ok(ImpactResponse {
             total,
             direct_dependents,
             risk_level,
+            risk_basis: "count of indexed reverse dependencies (static imports/references); \
+                         dynamic imports, string references and unindexed files are not counted"
+                .to_string(),
+            warnings,
+            index,
             path,
             depth,
             entries: entries_json,
@@ -1419,6 +1613,76 @@ fn fallback_bridge_invocations(root: &Path) -> Vec<python::PythonInvocation> {
         .collect()
 }
 
+/// `(walk_root, ignore_root)` pairs covering the watched parts of `scope`.
+///
+/// With no known watch roots at all (e.g. a one-off `organon watch` whose
+/// daemon metadata is gone) the scope itself is checked, as the best guess.
+fn freshness_targets(scope: &Path, known_roots: &[PathBuf]) -> Vec<(PathBuf, PathBuf)> {
+    if known_roots.is_empty() {
+        return vec![(scope.to_path_buf(), scope.to_path_buf())];
+    }
+    let mut targets = Vec::new();
+    for root in known_roots {
+        if root.starts_with(scope) {
+            targets.push((root.clone(), root.clone()));
+        } else if scope.starts_with(root) {
+            targets.push((scope.to_path_buf(), root.clone()));
+        }
+    }
+    // Nested watch roots would be walked twice.
+    targets.sort();
+    let mut kept: Vec<(PathBuf, PathBuf)> = Vec::new();
+    for t in targets {
+        if !kept.iter().any(|k| t.0.starts_with(&k.0)) {
+            kept.push(t);
+        }
+    }
+    kept
+}
+
+/// How the indexed entity at `path` relates to the file on disk.
+fn file_status(
+    path: &str,
+    entity: Option<&Entity>,
+    config: &OrgConfig,
+    scope: Option<&Path>,
+) -> &'static str {
+    let meta = std::fs::symlink_metadata(path).ok().filter(|m| m.is_file());
+    match (entity, meta) {
+        (Some(_), None) => "missing_on_disk",
+        (Some(e), Some(m)) => {
+            let mtime = m
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs() as i64);
+            let mtime_differs = !config.watch.use_git_timestamps && mtime != Some(e.modified_at);
+            if e.size_bytes != m.len() || mtime_differs {
+                "changed_since_index"
+            } else {
+                "indexed"
+            }
+        }
+        (None, Some(_)) => {
+            // .organonignore lives at the watch root.
+            let known = freshness::known_watch_roots(&config.watch.roots);
+            let root = known
+                .iter()
+                .find(|r| Path::new(path).starts_with(r))
+                .map(PathBuf::as_path)
+                .or(scope)
+                .unwrap_or_else(|| Path::new(path).parent().unwrap_or(Path::new("/")));
+            let ignore = IgnoreSet::load(root, &config.watch.ignore_segments);
+            if ignore.is_ignored(Path::new(path)) {
+                "not_found"
+            } else {
+                "not_indexed"
+            }
+        }
+        (None, None) => "not_found",
+    }
+}
+
 impl Default for McpService {
     fn default() -> Self {
         Self::from_config(OrgConfig::load())
@@ -1511,7 +1775,12 @@ impl OrganonMcpServer {
                 &metadata_filter,
                 explain,
             )
-            .map(|items| Json(SearchFilesResponse { items }))
+            .map(|items| {
+                Json(SearchFilesResponse {
+                    items,
+                    index: self.service.index_freshness(),
+                })
+            })
             .map_err(|e| e.to_string())
     }
 
@@ -1539,18 +1808,16 @@ impl OrganonMcpServer {
             .map_err(|e| e.to_string())
     }
 
-    #[tool(description = "Get full metadata for file path. Returns structured entity object.")]
+    #[tool(
+        description = "Get full metadata for file path. Returns structured entity object; `file_status` says whether the file on disk is indexed and up to date."
+    )]
     async fn get_entity(
         &self,
         Parameters(req): Parameters<PathRequest>,
     ) -> Result<Json<GetEntityResponse>, String> {
         self.service
-            .get_entity(&req.path)
-            .map(|entity| {
-                Json(GetEntityResponse {
-                    entity: entity.map(EntityRecord::from),
-                })
-            })
+            .get_entity_response(&req.path)
+            .map(Json)
             .map_err(|e| e.to_string())
     }
 
@@ -1613,7 +1880,7 @@ impl OrganonMcpServer {
     }
 
     #[tool(
-        description = "Reverse dependency analysis: show what files import/depend on a given file. Useful before rename, refactor, or delete."
+        description = "Reverse dependency analysis: show what files import/depend on a given file. Useful before rename, refactor, or delete. Check `warnings` and `index.status`: a stale index means dependents can be missing."
     )]
     async fn get_impact(
         &self,
@@ -1649,7 +1916,12 @@ impl OrganonMcpServer {
                 req.limit.unwrap_or(10),
                 req.path_prefix.as_deref(),
             )
-            .map(|items| Json(SearchFilesResponse { items }))
+            .map(|items| {
+                Json(SearchFilesResponse {
+                    items,
+                    index: self.service.index_freshness(),
+                })
+            })
             .map_err(|e| e.to_string())
     }
 
@@ -2547,5 +2819,204 @@ mod tests {
                 "missing output schema for {name}"
             );
         }
+    }
+
+    // ── index freshness ──────────────────────────────────────────────────────
+
+    struct FreshFx {
+        _dir: tempfile::TempDir,
+        root: PathBuf,
+        service: McpService,
+        graph: Graph,
+        _db: NamedTempFile,
+    }
+
+    impl FreshFx {
+        fn new() -> Self {
+            let dir = tempfile::TempDir::new().unwrap();
+            let root = dir.path().canonicalize().unwrap();
+            let db = NamedTempFile::new().unwrap();
+            let graph = Graph::open(db.path().to_string_lossy().as_ref()).unwrap();
+            let mut config = OrgConfig::default();
+            config.indexer.db_path = db.path().display().to_string();
+            // Declare the root as watched; daemons running on the host are
+            // also discovered but never overlap a fresh temp dir.
+            config.watch.roots = vec![root.clone()];
+            let service =
+                McpService::new_with_scope(db.path().to_path_buf(), config, Some(root.clone()));
+            Self {
+                _dir: dir,
+                root,
+                service,
+                graph,
+                _db: db,
+            }
+        }
+        fn write(&self, name: &str, body: &str) -> String {
+            let p = self.root.join(name);
+            std::fs::write(&p, body).unwrap();
+            p.to_string_lossy().to_string()
+        }
+        fn index(&self, path: &str) {
+            let e = Entity::from_path_with_options(path, false).unwrap();
+            self.graph.upsert(&e).unwrap();
+        }
+    }
+
+    #[test]
+    fn impact_on_fresh_index_has_no_warnings() {
+        let fx = FreshFx::new();
+        let routing = fx.write("routing.py", "QUEUES = 1");
+        let metrics = fx.write("metrics.py", "from routing import QUEUES");
+        fx.index(&routing);
+        fx.index(&metrics);
+        fx.graph
+            .upsert_relation(&metrics, &routing, "imports")
+            .unwrap();
+
+        let r = fx.service.get_impact(&routing, 5).unwrap();
+        assert_eq!(r.index.status, "fresh");
+        assert!(r.warnings.is_empty(), "{:?}", r.warnings);
+        assert!(r.risk_basis.contains("unindexed"));
+    }
+
+    #[test]
+    fn impact_warns_when_dependents_may_be_unindexed() {
+        // The reported case: runner.py imports routing.py but is not indexed.
+        let fx = FreshFx::new();
+        let routing = fx.write("routing.py", "QUEUES = 1");
+        let metrics = fx.write("metrics.py", "from routing import QUEUES");
+        let runner = fx.write("runner.py", "from routing import QUEUES");
+        fx.index(&routing);
+        fx.index(&metrics);
+        fx.graph
+            .upsert_relation(&metrics, &routing, "imports")
+            .unwrap();
+
+        let r = fx.service.get_impact(&routing, 5).unwrap();
+        assert_eq!(r.total, 1);
+        assert_eq!(r.index.status, "stale");
+        assert_eq!(r.index.new, 1);
+        assert_eq!(r.index.examples, vec![runner]);
+        assert!(
+            r.warnings.iter().any(|w| w.contains("index is stale")),
+            "{:?}",
+            r.warnings
+        );
+    }
+
+    #[test]
+    fn impact_warns_when_target_is_not_indexed() {
+        let fx = FreshFx::new();
+        let routing = fx.write("routing.py", "QUEUES = 1");
+        let r = fx.service.get_impact(&routing, 5).unwrap();
+        assert!(
+            r.warnings.iter().any(|w| w.contains("not indexed")),
+            "{:?}",
+            r.warnings
+        );
+    }
+
+    #[test]
+    fn get_entity_distinguishes_unindexed_changed_and_missing() {
+        let fx = FreshFx::new();
+        let unindexed = fx.write("runner.py", "x");
+        let changed = fx.write("changed.py", "x");
+        let gone = fx.write("gone.py", "x");
+        let ok = fx.write("ok.py", "x");
+        for p in [&changed, &gone, &ok] {
+            fx.index(p);
+        }
+        std::fs::write(&changed, "longer content").unwrap();
+        std::fs::remove_file(&gone).unwrap();
+
+        let status = |p: &str| fx.service.get_entity_response(p).unwrap().file_status;
+        assert_eq!(status(&unindexed), "not_indexed");
+        assert_eq!(status(&changed), "changed_since_index");
+        assert_eq!(status(&gone), "missing_on_disk");
+        assert_eq!(status(&ok), "indexed");
+        assert_eq!(
+            status(&fx.root.join("nope.py").to_string_lossy()),
+            "not_found"
+        );
+        let r = fx.service.get_entity_response(&unindexed).unwrap();
+        assert!(r.entity.is_none());
+        assert_eq!(r.index.status, "stale");
+    }
+
+    #[test]
+    fn freshness_is_unknown_without_scope() {
+        let (service, _graph, _file) = temp_service();
+        assert_eq!(service.index_freshness().status, "unknown");
+    }
+
+    #[test]
+    fn freshness_is_cached_within_ttl() {
+        let fx = FreshFx::new();
+        let a = fx.write("a.py", "a");
+        fx.index(&a);
+        assert_eq!(fx.service.index_freshness().status, "fresh");
+        fx.write("b.py", "b");
+        assert_eq!(
+            fx.service.index_freshness().status,
+            "fresh",
+            "cached value reused"
+        );
+        *fx.service.freshness_cache.lock().unwrap() = None;
+        assert_eq!(fx.service.index_freshness().status, "stale");
+    }
+}
+
+#[cfg(test)]
+mod freshness_target_tests {
+    use super::*;
+
+    fn p(s: &str) -> PathBuf {
+        PathBuf::from(s)
+    }
+
+    #[test]
+    fn scope_equal_to_root() {
+        assert_eq!(
+            freshness_targets(&p("/w/a"), &[p("/w/a")]),
+            vec![(p("/w/a"), p("/w/a"))]
+        );
+    }
+
+    #[test]
+    fn scope_inside_root_uses_root_ignore_rules() {
+        assert_eq!(
+            freshness_targets(&p("/w/a/src"), &[p("/w/a")]),
+            vec![(p("/w/a/src"), p("/w/a"))]
+        );
+    }
+
+    #[test]
+    fn scope_above_roots_checks_only_watched_parts() {
+        assert_eq!(
+            freshness_targets(&p("/w"), &[p("/w/a"), p("/w/b"), p("/other")]),
+            vec![(p("/w/a"), p("/w/a")), (p("/w/b"), p("/w/b"))]
+        );
+    }
+
+    #[test]
+    fn unwatched_scope_has_no_targets() {
+        assert!(freshness_targets(&p("/w/c"), &[p("/w/a")]).is_empty());
+    }
+
+    #[test]
+    fn no_known_roots_falls_back_to_scope() {
+        assert_eq!(
+            freshness_targets(&p("/w/a"), &[]),
+            vec![(p("/w/a"), p("/w/a"))]
+        );
+    }
+
+    #[test]
+    fn nested_roots_are_walked_once() {
+        assert_eq!(
+            freshness_targets(&p("/w"), &[p("/w/a"), p("/w/a/sub")]),
+            vec![(p("/w/a"), p("/w/a"))]
+        );
     }
 }

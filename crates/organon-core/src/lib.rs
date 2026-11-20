@@ -1,5 +1,6 @@
 pub mod config;
 pub mod entity;
+pub mod freshness;
 pub mod git;
 pub mod graph;
 pub mod ignore;

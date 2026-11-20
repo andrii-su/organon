@@ -181,7 +181,7 @@ pub fn workspace_paths(id: &str) -> WorkspacePaths {
     }
 }
 
-fn organon_home() -> PathBuf {
+pub fn organon_home() -> PathBuf {
     std::env::var("ORGANON_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|_| {

@@ -95,7 +95,9 @@ Add this to your Claude Desktop `mcpServers` config:
    - `search_files` to find relevant code.
    - `get_entity` and `get_graph` to understand entry points and dependencies.
    - `get_file_content` to read the actual source.
-   - `get_impact` before editing to understand blast radius.
+   - `get_impact` before editing to understand blast radius. If `warnings` is
+     non-empty or `index.status` is `stale`, dependents may be missing: confirm
+     with a text search before a rename or refactor.
    - `get_history` to distinguish active files from stale context.
    - `build_context` for a single compact pack when starting a new task.
 

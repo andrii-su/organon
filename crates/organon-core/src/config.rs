@@ -40,6 +40,9 @@ pub struct WatchConfig {
     pub ignore_segments: Vec<String>,
     /// Use git log for created_at/modified_at when inside a git repo
     pub use_git_timestamps: bool,
+    /// Seconds between disk ↔ graph reconciliation passes in `organon watch`
+    /// (repairs events the watcher missed). 0 disables the periodic pass.
+    pub reconcile_interval_secs: u64,
 }
 
 impl Default for WatchConfig {
@@ -49,6 +52,7 @@ impl Default for WatchConfig {
             index_interval_secs: 30,
             ignore_segments: vec![],
             use_git_timestamps: false,
+            reconcile_interval_secs: 300,
         }
     }
 }
