@@ -1112,6 +1112,17 @@ impl McpService {
         limit: usize,
         path_prefix: Option<&str>,
     ) -> Result<Vec<SearchHit>> {
+        self.search_similar_with_refresh(path, limit, path_prefix)
+            .map(|(hits, _)| hits)
+    }
+
+    /// Files similar to `path`, with the same freshness guard as search.
+    pub fn search_similar_with_refresh(
+        &self,
+        path: &str,
+        limit: usize,
+        path_prefix: Option<&str>,
+    ) -> Result<(Vec<SearchHit>, Option<RefreshStats>)> {
         let limit = limit.min(MAX_MCP_RESULTS);
         let path = normalize_request_path(path);
         self.ensure_in_scope(&path)?;
@@ -1124,19 +1135,25 @@ impl McpService {
             "path_prefix": path_prefix,
             "graph_db": self.db_path,
         }))?;
-        let rows: Vec<serde_json::Value> = serde_json::from_str(&output)?;
-        Ok(rows
-            .into_iter()
-            .filter_map(|r| {
-                Some(SearchHit {
-                    path: r["path"].as_str()?.to_string(),
-                    score: r["score"].as_f64().unwrap_or(0.0),
-                    source: "vector".to_string(),
-                    explanation: None,
-                    changed_since_indexed: false,
-                })
-            })
-            .collect())
+        let parsed = parse_bridge_search::<VectorRow>(&output)?;
+        let graph = self.open_graph()?;
+        let mut hits = Vec::new();
+        for row in parsed.items {
+            let state = hit_state(&graph, &row.path)?;
+            if state == HitState::Gone {
+                continue;
+            }
+            let changed =
+                row.stale || (state == HitState::ChangedSinceIndexed && parsed.refresh.is_none());
+            hits.push(SearchHit {
+                path: row.path,
+                score: row.score,
+                source: "vector".to_string(),
+                explanation: None,
+                changed_since_indexed: changed,
+            });
+        }
+        Ok((hits, parsed.refresh))
     }
 
     pub fn get_graph(&self, path: &str, depth: u8) -> Result<RelationGraph> {
@@ -1207,6 +1224,7 @@ impl McpService {
         explain: bool,
     ) -> Result<(Vec<SearchHit>, Option<RefreshStats>)> {
         let mut refresh = None;
+        let mut stale = std::collections::HashSet::new();
         let limit = limit.min(MAX_MCP_RESULTS);
         let path_prefix = self.effective_prefix(path_prefix)?;
         let mut merged: BTreeMap<String, MergeEntry> = BTreeMap::new();
@@ -1220,6 +1238,7 @@ impl McpService {
             let (results, stats) =
                 self.vector_search(query, candidate_limit, path_prefix.as_deref())?;
             refresh = stats;
+            stale.extend(results.iter().filter(|r| r.stale).map(|r| r.path.clone()));
             let weight = if matches!(mode, SearchMode::Hybrid) {
                 0.7
             } else {
@@ -1295,10 +1314,15 @@ impl McpService {
             for (path, entry) in rows {
                 match hit_state(&graph, &path)? {
                     HitState::Gone => continue,
-                    HitState::ChangedSinceIndexed if !entry.from_vector => {
+                    // Vector hits were refreshed by the bridge, unless it is an
+                    // older Python layer that does not refresh at all.
+                    HitState::ChangedSinceIndexed if !entry.from_vector || refresh.is_none() => {
                         changed.insert(path.clone());
                     }
                     _ => {}
+                }
+                if stale.contains(&path) {
+                    changed.insert(path.clone());
                 }
                 kept.push((path, entry));
             }
@@ -1964,16 +1988,16 @@ impl OrganonMcpServer {
         Parameters(req): Parameters<SearchSimilarRequest>,
     ) -> Result<Json<SearchFilesResponse>, String> {
         self.service
-            .search_similar(
+            .search_similar_with_refresh(
                 &req.path,
                 req.limit.unwrap_or(10),
                 req.path_prefix.as_deref(),
             )
-            .map(|items| {
+            .map(|(items, refresh)| {
                 Json(SearchFilesResponse {
                     items,
                     index: self.service.index_freshness(),
-                    warnings: Vec::new(),
+                    warnings: refresh_warning(refresh).into_iter().collect(),
                 })
             })
             .map_err(|e| e.to_string())
@@ -2107,12 +2131,7 @@ fn to_mcp_error(err: anyhow::Error) -> McpError {
 
 /// Warning for the response when the bridge's refresh ran out of budget.
 fn refresh_warning(refresh: Option<RefreshStats>) -> Option<String> {
-    refresh.filter(|r| r.pending > 0).map(|r| {
-        format!(
-            "{} changed file(s) not yet re-indexed; results may miss them",
-            r.pending
-        )
-    })
+    refresh.as_ref().and_then(RefreshStats::warning)
 }
 
 /// Raw row returned by the Python vector search function.
@@ -2121,6 +2140,9 @@ struct VectorRow {
     path: String,
     score: f64,
     text_preview: Option<String>,
+    /// The bridge found this file changed but could not re-index it in time.
+    #[serde(default)]
+    stale: bool,
 }
 
 /// Internal per-path accumulator used during search merge phase.
@@ -2807,6 +2829,22 @@ mod tests {
             }))
             .as_deref(),
             Some("4 changed file(s) not yet re-indexed; results may miss them")
+        );
+        assert_eq!(
+            refresh_warning(Some(RefreshStats {
+                unchecked: 9,
+                ..Default::default()
+            }))
+            .as_deref(),
+            Some("9 file(s) not yet checked for changes; results may miss them")
+        );
+        assert_eq!(
+            refresh_warning(Some(RefreshStats {
+                error: Some("database is locked".into()),
+                ..Default::default()
+            }))
+            .as_deref(),
+            Some("index refresh skipped (database is locked); results may be stale")
         );
     }
 

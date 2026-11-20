@@ -5,7 +5,7 @@ use anyhow::Result;
 use clap::ValueEnum;
 use organon_core::{
     config::OrgConfig,
-    fresh::{hit_state, parse_bridge_search, HitState},
+    fresh::{hit_state, parse_bridge_search, HitState, RefreshStats},
     graph::{entity_matches_filter, FindFilter, Graph},
 };
 use serde::{Deserialize, Serialize};
@@ -72,6 +72,9 @@ pub struct SearchPage {
     /// Changed files the bridge's query-time refresh left for later.
     #[serde(default)]
     pub refresh_pending: usize,
+    /// Warning when the results may be incomplete or stale.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refresh_note: Option<String>,
 }
 
 // Internal per-path accumulator used during merge phase.
@@ -137,7 +140,9 @@ pub fn search_entities(params: SearchParams) -> Result<SearchPage> {
     });
 
     let mut merged: BTreeMap<String, MergeEntry> = BTreeMap::new();
-    let mut refresh_pending = 0;
+    let mut refresh: Option<RefreshStats> = None;
+    let mut bridge_refreshed = false;
+    let mut stale = std::collections::HashSet::new();
     let desired = (params.limit + params.offset).max(1);
     let candidate_limit = if metadata_filter_requested(params.metadata_filter) {
         desired.saturating_mul(12)
@@ -159,7 +164,8 @@ pub fn search_entities(params: SearchParams) -> Result<SearchPage> {
             &bridge_env(params.config, &bridge_args),
         )?;
         let parsed = parse_bridge_search::<serde_json::Value>(&output)?;
-        refresh_pending = parsed.refresh.map_or(0, |r| r.pending);
+        bridge_refreshed = parsed.refresh.is_some();
+        refresh = parsed.refresh;
         let results = parsed.items;
         let weight = if matches!(params.mode, SearchMode::Hybrid) {
             0.7
@@ -167,6 +173,9 @@ pub fn search_entities(params: SearchParams) -> Result<SearchPage> {
             1.0
         };
         for row in results {
+            if let (Some(path), Some(true)) = (row["path"].as_str(), row["stale"].as_bool()) {
+                stale.insert(path.to_string());
+            }
             if let Some(path) = row["path"].as_str() {
                 let raw_score = row["score"].as_f64().unwrap_or(0.0);
                 let preview = row["text_preview"].as_str().map(|s| s.to_string());
@@ -240,10 +249,15 @@ pub fn search_entities(params: SearchParams) -> Result<SearchPage> {
         for (path, entry) in results {
             match hit_state(&graph, &path)? {
                 HitState::Gone => continue,
-                HitState::ChangedSinceIndexed if !entry.from_vector => {
+                // Vector hits were refreshed by the bridge, unless it is an
+                // older Python layer that does not refresh at all.
+                HitState::ChangedSinceIndexed if !entry.from_vector || !bridge_refreshed => {
                     changed.insert(path.clone());
                 }
                 _ => {}
+            }
+            if stale.contains(&path) {
+                changed.insert(path.clone());
             }
             kept.push((path, entry));
         }
@@ -287,7 +301,8 @@ pub fn search_entities(params: SearchParams) -> Result<SearchPage> {
         limit: params.limit,
         offset: params.offset,
         has_more: params.offset + params.limit < total,
-        refresh_pending,
+        refresh_pending: refresh.as_ref().map_or(0, |r| r.pending),
+        refresh_note: refresh.as_ref().and_then(RefreshStats::warning),
     })
 }
 
@@ -494,22 +509,28 @@ pub fn search_by_example(
     });
     let output = python_run_with_env(&["-m", "ai.bridge"], &bridge_env(config, &bridge_args))?;
 
-    let results: Vec<serde_json::Value> = serde_json::from_str(&output)?;
+    let parsed = parse_bridge_search::<serde_json::Value>(&output)?;
+    let graph = Graph::open(&config.indexer.db_path)?;
+    let mut results = Vec::new();
+    for row in parsed.items {
+        let Some(path) = row["path"].as_str() else {
+            continue;
+        };
+        let state = hit_state(&graph, path)?;
+        if state == HitState::Gone {
+            continue;
+        }
+        results.push(SearchHit {
+            path: path.to_string(),
+            score: row["score"].as_f64().unwrap_or(0.0),
+            source: "vector".to_string(),
+            explanation: None,
+            changed_since_indexed: row["stale"].as_bool().unwrap_or(false)
+                || (state == HitState::ChangedSinceIndexed && parsed.refresh.is_none()),
+        });
+    }
     let total = results.len();
-    let items = results
-        .into_iter()
-        .skip(offset)
-        .take(limit)
-        .filter_map(|r| {
-            Some(SearchHit {
-                path: r["path"].as_str()?.to_string(),
-                score: r["score"].as_f64().unwrap_or(0.0),
-                source: "vector".to_string(),
-                explanation: None,
-                changed_since_indexed: false,
-            })
-        })
-        .collect();
+    let items = results.into_iter().skip(offset).take(limit).collect();
 
     Ok(SearchPage {
         items,
@@ -517,7 +538,8 @@ pub fn search_by_example(
         limit,
         offset,
         has_more: offset + limit < total,
-        refresh_pending: 0,
+        refresh_pending: parsed.refresh.as_ref().map_or(0, |r| r.pending),
+        refresh_note: parsed.refresh.as_ref().and_then(RefreshStats::warning),
     })
 }
 

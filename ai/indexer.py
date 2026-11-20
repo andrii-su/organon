@@ -29,7 +29,7 @@ from ai.embeddings.store import (
     update_path_in_store,
 )
 from ai.extractor.extract import extract_text
-from ai.freshness import file_hash
+from ai.freshness import file_hash, mark_no_text, no_text_map
 from ai.relations.extract import extract_relations
 from ai.relations.store import delete_relations_from, upsert_relations
 from ai.routes.fastapi import discover_routes, replace_route_index
@@ -267,12 +267,11 @@ def run_once(
         "sensitive_skipped": 0,
     }
 
+    no_text = no_text_map(db_path)
     for entity in entities:
         path = entity["path"]
         name = entity["name"]
-        # Key the vector by the bytes actually embedded: the graph hash can lag
-        # behind the file, and search refreshes write the disk hash too.
-        content_hash = file_hash(path) or entity["content_hash"]
+        content_hash = entity["content_hash"]
         needs_vector = (path, content_hash) not in indexed_pairs
         needs_fts = path not in fts_paths
 
@@ -287,6 +286,18 @@ def run_once(
             stats["sensitive_skipped"] += 1
             continue
 
+        if needs_vector:
+            # Key the vector by the bytes actually embedded: the graph hash can
+            # lag behind the file, and search refreshes write the disk hash.
+            # Only read the file when the graph says it is not indexed yet.
+            content_hash = file_hash(path) or content_hash
+            needs_vector = (path, content_hash) not in indexed_pairs
+
+        if no_text.get(path) == content_hash:
+            logger.debug("skipped (no text, marked): %s", path)
+            stats["skipped"] += 1
+            continue
+
         if not (needs_vector or needs_fts):
             logger.debug("skipped (already indexed and enriched): %s", path)
             stats["skipped"] += 1
@@ -296,6 +307,8 @@ def run_once(
         if not text or not text.strip():
             logger.debug("skipped (no text): %s", path)
             stats["skipped"] += 1
+            if not content_hash.startswith("size:"):
+                mark_no_text(db_path, path, content_hash)
             continue
 
         try:

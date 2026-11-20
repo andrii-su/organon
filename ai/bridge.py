@@ -57,12 +57,15 @@ def _run(args: dict) -> object:
         if args.get("graph_db"):
             from pathlib import Path
 
-            from ai.freshness import Refresher
+            from ai.freshness import search_by_path_fresh
 
-            refresher = Refresher(Path(args["graph_db"]), args.get("db_path"))
-            refresher.refresh_suspects(args.get("path_prefix"))
-            refresher.refresh_candidates([{"path": args["path"]}])
-
+            return search_by_path_fresh(
+                args["path"],
+                args["limit"],
+                args.get("db_path"),
+                args.get("path_prefix"),
+                Path(args["graph_db"]),
+            )
         return search_by_path(
             args["path"],
             limit=args["limit"],

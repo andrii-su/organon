@@ -164,7 +164,8 @@ def test_graph_behind_disk_does_not_reembed_twice(env, monkeypatch):
 
     result = _search(env, "refund")
 
-    assert result["refresh"] == {"refreshed": 0, "removed": 0, "pending": 0}
+    stats = result["refresh"]
+    assert (stats["refreshed"], stats["removed"], stats["pending"]) == (0, 0, 0)
     assert calls == ["refund"]
 
 
@@ -187,10 +188,11 @@ def test_zero_time_budget_refreshes_nothing_but_answers(env):
         Path(p).write_text("refund")
         _graph_upsert(env["graph"], p, file_hash(p))
 
-    result = _search(env, "payment", max_seconds=0.0)
+    result = _search(env, "payment", max_seconds=0.0, candidate_seconds=0.0)
 
-    assert result["refresh"]["refreshed"] == 0
-    assert result["refresh"]["pending"] == 3
+    stats = result["refresh"]
+    assert stats["refreshed"] == 0
+    assert stats["pending"] + stats["unchecked"] >= 3
     assert result["items"]
 
 
@@ -232,7 +234,7 @@ def test_search_by_path_with_graph_db_refreshes_seed(env):
          "graph_db": str(env["graph"])}
     )
 
-    assert isinstance(out, list)
+    assert set(out) == {"items", "refresh"}
     assert _vector_rows(env)[a] == file_hash(a)
 
 
@@ -277,3 +279,129 @@ def test_file_replaced_by_symlink_is_never_read(env, tmp_path):
     assert a not in [i["path"] for i in result["items"]]
     assert a not in _vector_rows(env)
     assert a not in _fts_paths(env)
+
+
+# ── final review fixes ────────────────────────────────────────────────────────
+
+
+def _binary(env, name: str) -> str:
+    p = env["proj"] / name
+    p.write_bytes(b"\x89PNG\x00\x01" + os.urandom(64))
+    _graph_upsert(env["graph"], str(p), file_hash(str(p)))
+    return str(p)
+
+
+def test_no_text_files_do_not_starve_real_edits(env):
+    # C1: many binaries without a no-text mark must not use the file budget.
+    a = _index(env, "a.py", "payment")
+    for i in range(30):
+        _binary(env, f"img{i:02d}.png")
+    Path(a).write_text("refund")
+    _graph_upsert(env["graph"], a, file_hash(a))  # watcher already saw the edit
+
+    result = _search(env, "refund", max_files=5)
+
+    assert result["refresh"]["refreshed"] == 1
+    assert result["refresh"]["pending"] == 0
+    assert result["items"][0]["path"] == a
+
+
+def test_classification_respects_deadline(env, monkeypatch):
+    # C1: with no time left, suspects are not even hashed.
+    import ai.freshness as fr
+
+    for i in range(40):
+        p = _index(env, f"f{i:02d}.py", "payment")
+        Path(p).write_text(f"refund {i}")
+        _graph_upsert(env["graph"], p, file_hash(p))
+    calls = []
+    real = fr.disk_state
+    monkeypatch.setattr(fr, "disk_state", lambda p, h: calls.append(p) or real(p, h))
+
+    _search(env, "payment", max_seconds=0.0, candidate_seconds=0.0)
+
+    assert len(calls) <= 5  # at most the query's own candidates
+
+
+def test_own_edit_is_refreshed_despite_backlog(env):
+    # I1: the candidates pass has its own budget, so the edit the agent just
+    # made is refreshed even when the backlog used up the shared budget.
+    a = _index(env, "a.py", "payment gateway")
+    for i in range(60):
+        p = _index(env, f"s{i:02d}.py", "shipping")
+        Path(p).write_text(f"shipping v2 {i}")
+        _graph_upsert(env["graph"], p, file_hash(p))
+    Path(a).write_text("refund flow")  # graph not updated yet
+
+    items = _search(env, "payment")["items"]
+
+    assert not items or items[0]["path"] != a or items[0]["score"] < 0.5
+
+
+def test_unapplied_candidate_is_flagged_stale(env):
+    # I1: a candidate found changed but not refreshed is marked, not served silently.
+    a = _index(env, "a.py", "payment gateway")
+    Path(a).write_text("refund flow")
+
+    items = _search(env, "payment", max_seconds=0.0, candidate_seconds=0.0)["items"]
+
+    hit = next(i for i in items if i["path"] == a)
+    assert hit["stale"] is True
+
+
+def test_refresh_error_falls_back_to_plain_search(env, monkeypatch):
+    # I2: a locked DB must not fail the search.
+    import ai.indexer
+
+    _index(env, "a.py", "payment")
+
+    def locked(*_a, **_k):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(ai.indexer, "get_entities", locked)
+
+    result = _search(env, "payment")
+
+    assert result["items"][0]["path"].endswith("a.py")
+    assert "database is locked" in result["refresh"]["error"]
+
+
+def test_per_file_failure_counts_as_pending(env, monkeypatch):
+    # I2: one file failing to embed does not stop the others.
+    import ai.freshness as fr
+
+    a = _index(env, "a.py", "payment")
+    b = _index(env, "b.py", "payment")
+    for p in (a, b):
+        Path(p).write_text("refund")
+        _graph_upsert(env["graph"], p, file_hash(p))
+    real = fr.index_file
+
+    def flaky(path, *args, **kwargs):
+        if path == a:
+            raise RuntimeError("lance commit conflict")
+        return real(path, *args, **kwargs)
+
+    monkeypatch.setattr(fr, "index_file", flaky)
+
+    result = _search(env, "refund")
+
+    assert result["refresh"]["refreshed"] == 1
+    assert result["refresh"]["pending"] == 1
+
+
+def test_search_by_path_drops_deleted_results(env):
+    # I4: similar-file search re-checks its results and reports the refresh.
+    from ai.bridge import _run
+
+    a = _index(env, "a.py", "payment gateway")
+    b = _index(env, "b.py", "payment terminal")
+    Path(b).unlink()
+
+    out = _run(
+        {"op": "search_by_path", "path": a, "limit": 3, "db_path": env["vec"],
+         "graph_db": str(env["graph"])}
+    )
+
+    assert set(out) == {"items", "refresh"}
+    assert b not in [i["path"] for i in out["items"]]

@@ -1,4 +1,5 @@
 """Tests for ai/indexer.py — run_once logic."""
+import hashlib
 import sqlite3
 from pathlib import Path
 from unittest.mock import patch
@@ -655,3 +656,44 @@ def test_run_once_skips_when_disk_hash_already_indexed(tmp_path):
         run_once(db)
 
     assert mock_index.call_count == 0
+
+
+def test_run_once_marks_no_text_files_and_skips_them_next_time(tmp_path):
+    # C1: the periodic indexer records files without text for the search refresh.
+    f = tmp_path / "__init__.py"
+    f.write_bytes(b"")
+    db = _disk_entity_db(tmp_path, f, hashlib.sha256(b"").hexdigest())
+    reads = []
+    with (
+        patch("ai.indexer.extract_text", side_effect=lambda p: reads.append(p) or ""),
+        patch("ai.indexer.index_file"),
+        patch("ai.indexer.get_all_entries", return_value=[]),
+        patch("ai.indexer._index_routes"),
+    ):
+        run_once(db)
+        run_once(db)
+
+    conn = sqlite3.connect(str(db))
+    marked = conn.execute("SELECT path, content_hash FROM ai_no_text").fetchall()
+    conn.close()
+    assert marked == [(str(f), hashlib.sha256(b"").hexdigest())]
+    assert reads == [str(f)]
+
+
+def test_run_once_does_not_hash_files_already_indexed(tmp_path):
+    # I3: an indexed, unchanged file costs no read.
+    f = tmp_path / "a.py"
+    f.write_bytes(b"same")
+    h = hashlib.sha256(b"same").hexdigest()
+    db = _disk_entity_db(tmp_path, f, h)
+    hashed = []
+    with (
+        patch("ai.indexer.file_hash", side_effect=lambda p: hashed.append(p) or h),
+        patch("ai.indexer.index_file"),
+        patch("ai.indexer.get_all_entries", return_value=[{"path": str(f), "content_hash": h}]),
+        patch("ai.indexer._index_routes"),
+    ):
+        _seed_fts(db, [str(f)])
+        run_once(db)
+
+    assert hashed == []

@@ -52,12 +52,43 @@ pub fn hit_state(graph: &Graph, path: &str) -> Result<HitState> {
 }
 
 /// Counts reported by the bridge's query-time refresh.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RefreshStats {
     pub refreshed: usize,
     pub removed: usize,
-    /// Changed files left for later because the refresh budget ran out.
+    /// Files found changed or deleted but not re-indexed (budget or error).
     pub pending: usize,
+    /// Files not even checked because the time budget ran out.
+    #[serde(default)]
+    pub unchecked: usize,
+    /// Set when the refresh failed as a whole and the search ran without it.
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+impl RefreshStats {
+    /// A one-line warning for responses, or `None` when the results are fresh.
+    pub fn warning(&self) -> Option<String> {
+        if let Some(error) = &self.error {
+            return Some(format!(
+                "index refresh skipped ({error}); results may be stale"
+            ));
+        }
+        let mut parts = Vec::new();
+        if self.pending > 0 {
+            parts.push(format!(
+                "{} changed file(s) not yet re-indexed",
+                self.pending
+            ));
+        }
+        if self.unchecked > 0 {
+            parts.push(format!(
+                "{} file(s) not yet checked for changes",
+                self.unchecked
+            ));
+        }
+        (!parts.is_empty()).then(|| format!("{}; results may miss them", parts.join(", ")))
+    }
 }
 
 /// Bridge `search` output in either shape.
@@ -120,7 +151,8 @@ mod tests {
             Some(RefreshStats {
                 refreshed: 1,
                 removed: 2,
-                pending: 3
+                pending: 3,
+                ..Default::default()
             })
         );
     }
@@ -142,6 +174,17 @@ mod tests {
         std::os::unix::fs::symlink(&outside, &file).unwrap();
 
         assert_eq!(hit_state(&graph, path).unwrap(), HitState::Gone);
+    }
+
+    #[test]
+    fn parses_unchecked_and_error() {
+        let out: BridgeSearch<Row> = parse_bridge_search(
+            r#"{"items":[],"refresh":{"refreshed":0,"removed":0,"pending":0,"unchecked":7,"error":"database is locked"}}"#,
+        )
+        .unwrap();
+        let refresh = out.refresh.unwrap();
+        assert_eq!(refresh.unchecked, 7);
+        assert_eq!(refresh.error.as_deref(), Some("database is locked"));
     }
 
     #[test]
