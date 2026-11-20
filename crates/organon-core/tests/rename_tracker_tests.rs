@@ -125,32 +125,27 @@ fn size_pseudo_hash_never_matches_as_rename() {
 #[test]
 fn flush_expired_deletes_from_graph() {
     let (graph, _f) = temp_graph();
+    // flush_expired keeps entities whose file is on disk, so use a path that
+    // is guaranteed not to exist rather than a fixed /tmp name.
+    let dir = tempfile::TempDir::new().unwrap();
+    let gone = dir.path().join("expire.rs");
+    let gone = gone.to_str().unwrap();
 
     // Insert the entity so delete_by_path has something to remove
     graph
         .lock()
         .unwrap()
-        .upsert(&entity("/tmp/expire.rs", "hash_flush"))
+        .upsert(&entity(gone, "hash_flush"))
         .unwrap();
-    assert!(graph
-        .lock()
-        .unwrap()
-        .get_by_path("/tmp/expire.rs")
-        .unwrap()
-        .is_some());
+    assert!(graph.lock().unwrap().get_by_path(gone).unwrap().is_some());
 
     let mut tracker = RenameTrackerHandle::new(Duration::from_secs(0));
-    tracker.push("/tmp/expire.rs".to_string(), "hash_flush".to_string());
+    tracker.push(gone.to_string(), "hash_flush".to_string());
     std::thread::sleep(Duration::from_millis(1));
     tracker.flush_expired(&graph);
 
     assert!(
-        graph
-            .lock()
-            .unwrap()
-            .get_by_path("/tmp/expire.rs")
-            .unwrap()
-            .is_none(),
+        graph.lock().unwrap().get_by_path(gone).unwrap().is_none(),
         "expired pending delete must be committed to the graph"
     );
 }
