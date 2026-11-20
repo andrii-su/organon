@@ -1,4 +1,5 @@
 """Tests for ai/indexer.py — run_once logic."""
+import hashlib
 import sqlite3
 from pathlib import Path
 from unittest.mock import patch
@@ -588,3 +589,111 @@ def test_run_once_empty_db(tmp_path, monkeypatch):
     stats = run_once(db)
     assert stats["total"] == 0
     assert stats["indexed"] == 0
+
+
+def test_delete_fts_removes_only_that_path(tmp_db):
+    from ai.indexer import delete_fts
+
+    _seed_fts(tmp_db, ["/src/main.py", "/src/utils.py"])
+    delete_fts(tmp_db, "/src/main.py")
+
+    conn = sqlite3.connect(str(tmp_db))
+    paths = [r[0] for r in conn.execute("SELECT path FROM entities_fts")]
+    conn.close()
+    assert paths == ["/src/utils.py"]
+
+
+def _disk_entity_db(tmp_path, path, graph_hash):
+    db = tmp_path / "disk.db"
+    conn = sqlite3.connect(str(db))
+    conn.execute(
+        "CREATE TABLE entities (id TEXT, path TEXT, name TEXT, extension TEXT, size_bytes INTEGER, "
+        "created_at INTEGER, modified_at INTEGER, accessed_at INTEGER, lifecycle TEXT, "
+        "content_hash TEXT, summary TEXT)"
+    )
+    conn.execute("CREATE TABLE relationships (from_path TEXT, to_path TEXT, kind TEXT, created_at INTEGER)")
+    conn.execute(
+        "INSERT INTO entities VALUES ('1', ?, 'a.py', '.py', 3, 0, 0, 0, 'active', ?, NULL)",
+        (str(path), graph_hash),
+    )
+    conn.commit()
+    conn.close()
+    return db
+
+
+def test_run_once_stores_disk_hash_when_graph_is_behind(tmp_path):
+    import hashlib
+
+    f = tmp_path / "a.py"
+    f.write_bytes(b"new")
+    db = _disk_entity_db(tmp_path, f, "old")
+    with (
+        patch("ai.indexer.index_file") as mock_index,
+        patch("ai.indexer.get_all_entries", return_value=[]),
+        patch("ai.indexer.extract_relations", return_value=[]),
+        patch("ai.indexer.upsert_relations"),
+        patch("ai.indexer._index_routes"),
+    ):
+        run_once(db)
+
+    assert mock_index.call_args.args[2] == hashlib.sha256(b"new").hexdigest()
+
+
+def test_run_once_skips_when_disk_hash_already_indexed(tmp_path):
+    import hashlib
+
+    f = tmp_path / "a.py"
+    f.write_bytes(b"new")
+    db = _disk_entity_db(tmp_path, f, "old")
+    indexed = [{"path": str(f), "content_hash": hashlib.sha256(b"new").hexdigest()}]
+    with (
+        patch("ai.indexer.index_file") as mock_index,
+        patch("ai.indexer.get_all_entries", return_value=indexed),
+        patch("ai.indexer.extract_relations", return_value=[]),
+        patch("ai.indexer.upsert_relations"),
+        patch("ai.indexer._index_routes"),
+    ):
+        run_once(db)
+
+    assert mock_index.call_count == 0
+
+
+def test_run_once_marks_no_text_files_and_skips_them_next_time(tmp_path):
+    # C1: the periodic indexer records files without text for the search refresh.
+    f = tmp_path / "__init__.py"
+    f.write_bytes(b"")
+    db = _disk_entity_db(tmp_path, f, hashlib.sha256(b"").hexdigest())
+    reads = []
+    with (
+        patch("ai.indexer.extract_text", side_effect=lambda p: reads.append(p) or ""),
+        patch("ai.indexer.index_file"),
+        patch("ai.indexer.get_all_entries", return_value=[]),
+        patch("ai.indexer._index_routes"),
+    ):
+        run_once(db)
+        run_once(db)
+
+    conn = sqlite3.connect(str(db))
+    marked = conn.execute("SELECT path, content_hash FROM ai_no_text").fetchall()
+    conn.close()
+    assert marked == [(str(f), hashlib.sha256(b"").hexdigest())]
+    assert reads == [str(f)]
+
+
+def test_run_once_does_not_hash_files_already_indexed(tmp_path):
+    # I3: an indexed, unchanged file costs no read.
+    f = tmp_path / "a.py"
+    f.write_bytes(b"same")
+    h = hashlib.sha256(b"same").hexdigest()
+    db = _disk_entity_db(tmp_path, f, h)
+    hashed = []
+    with (
+        patch("ai.indexer.file_hash", side_effect=lambda p: hashed.append(p) or h),
+        patch("ai.indexer.index_file"),
+        patch("ai.indexer.get_all_entries", return_value=[{"path": str(f), "content_hash": h}]),
+        patch("ai.indexer._index_routes"),
+    ):
+        _seed_fts(db, [str(f)])
+        run_once(db)
+
+    assert hashed == []

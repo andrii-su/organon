@@ -130,7 +130,7 @@ def search(
     db_path: str | None = None,
     path_prefix: str | None = None,
 ) -> list[dict[str, Any]]:
-    """Semantic search. Returns list of {path, score, text_preview}.
+    """Semantic search. Returns list of {path, score, text_preview, content_hash}.
 
     Args:
         query: Natural language query.
@@ -141,25 +141,52 @@ def search(
     logger.debug("search: %r limit=%d prefix=%r", query, limit, path_prefix)
     table = _get_table(db_path)
     vector = embed_text(query)
+    results = _vector_query(table, vector, limit, path_prefix)
+    logger.debug("search: %d results", len(results))
+    return results
 
-    fetch_limit = limit * 4 if path_prefix else limit
+
+def _vector_query(
+    table, vector, limit: int, path_prefix: str | None, exclude: str | None = None
+) -> list[dict[str, Any]]:
+    """Nearest rows to ``vector``: one per path (newest), scoped, as result dicts.
+
+    Over-fetches so that the prefix filter, the excluded path and duplicate
+    rows per path do not leave fewer than ``limit`` results.
+    """
+    fetch_limit = limit * 4 if path_prefix else limit + (1 if exclude else 0)
     results = table.search(vector).limit(fetch_limit).to_list()
-
+    if exclude is not None:
+        results = [r for r in results if r["path"] != exclude]
     if path_prefix:
         results = [r for r in results if r["path"].startswith(path_prefix)]
-        logger.debug("search: %d results after prefix filter", len(results))
-
-    results = results[:limit]
-    logger.debug("search: %d results", len(results))
-
     return [
         {
             "path": r["path"],
             "score": float(1 - r.get("_distance", 0)),
             "text_preview": r["text_preview"],
+            "content_hash": r["content_hash"],
         }
-        for r in results
+        for r in _newest_per_path(results)[:limit]
     ]
+
+
+def _newest_per_path(rows: list[dict]) -> list[dict]:
+    """Keep one row per path: the one with the newest ``indexed_at``.
+
+    Concurrent writers (indexer, search refresh) can briefly leave two rows for
+    one path; the newest is the current one. Order of first appearance is kept.
+    """
+    best: dict[str, dict] = {}
+    order: list[str] = []
+    for row in rows:
+        path = row["path"]
+        if path not in best:
+            order.append(path)
+            best[path] = row
+        elif (row.get("indexed_at") or 0) > (best[path].get("indexed_at") or 0):
+            best[path] = row
+    return [best[path] for path in order]
 
 
 def get_indexed_hashes(db_path: str | None = None) -> set[str]:
@@ -179,8 +206,16 @@ def get_all_entries(db_path: str | None = None) -> list[dict]:
     """Return all (path, content_hash) pairs stored in the vector store."""
     try:
         table = _get_table(db_path)
-        rows = table.search().select(["path", "content_hash"]).limit(100_000).to_list()
-        return [{"path": r["path"], "content_hash": r["content_hash"]} for r in rows]
+        rows = (
+            table.search()
+            .select(["path", "content_hash", "indexed_at"])
+            .limit(100_000)
+            .to_list()
+        )
+        return [
+            {"path": r["path"], "content_hash": r["content_hash"]}
+            for r in _newest_per_path(rows)
+        ]
     except Exception as e:
         logger.warning("get_all_entries failed: %s", e)
         return []
@@ -194,8 +229,8 @@ def search_by_path(
 ) -> list[dict[str, Any]]:
     """Find files similar to `path` using its existing vector embedding.
 
-    The file must already be indexed. Returns list of {path, score, text_preview},
-    excluding the query file itself.
+    The file must already be indexed. Returns list of
+    {path, score, text_preview, content_hash}, excluding the query file itself.
     """
     logger.debug("search_by_path: %r limit=%d prefix=%r", path, limit, path_prefix)
     table = _get_table(db_path)
@@ -211,23 +246,9 @@ def search_by_path(
         return []
 
     vector = rows[0]["vector"]
-    fetch_limit = limit * 4 if path_prefix else limit + 1
-    results = table.search(vector).limit(fetch_limit).to_list()
-
-    results = [r for r in results if r["path"] != path]
-    if path_prefix:
-        results = [r for r in results if r["path"].startswith(path_prefix)]
-
-    results = results[:limit]
+    results = _vector_query(table, vector, limit, path_prefix, exclude=path)
     logger.debug("search_by_path: %d results", len(results))
-    return [
-        {
-            "path": r["path"],
-            "score": float(1 - r.get("_distance", 0)),
-            "text_preview": r["text_preview"],
-        }
-        for r in results
-    ]
+    return results
 
 
 def update_path_in_store(old_path: str, new_path: str, db_path: str | None = None) -> bool:

@@ -87,6 +87,7 @@ pub fn build_context_pack(params: ContextParams) -> Result<ContextPack> {
                     score: 1.0,
                     source: "seed".to_string(),
                     explanation: None,
+                    changed_since_indexed: false,
                 },
             );
         }

@@ -91,6 +91,9 @@ pub(crate) fn cmd_search(
         explain,
     })?;
 
+    if let Some(note) = &results.refresh_note {
+        eprintln!("note: {note}");
+    }
     if results.items.is_empty() {
         println!("(no results — run `organon index` first)");
         return Ok(());
@@ -140,6 +143,9 @@ pub(crate) fn cmd_search_like(
 
     info!("search --like: {path_str} limit={limit}");
     let results = search_by_example(&path_str, limit, 0, dir, config)?;
+    if let Some(note) = &results.refresh_note {
+        eprintln!("note: {note}");
+    }
 
     if results.items.is_empty() {
         println!("(no results — run `organon index` first or file not indexed)");
