@@ -669,7 +669,7 @@ wheels = [
 
 [[package]]
 name = "organon-ai"
-version = "1.4.0"
+version = "1.4.19"
 source = { editable = "." }
 dependencies = [
     { name = "fastembed" },
