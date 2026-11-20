@@ -318,27 +318,34 @@ pub fn known_watch_roots(config_roots: &[PathBuf]) -> Vec<PathBuf> {
 pub fn is_gone(path: &Path) -> bool {
     match std::fs::symlink_metadata(path) {
         Err(e) => e.kind() == std::io::ErrorKind::NotFound,
-        Ok(_) => {
-            let (Some(name), Some(parent)) = (path.file_name(), path.parent()) else {
-                return false;
-            };
-            let Ok(entries) = std::fs::read_dir(parent) else {
-                return false;
-            };
-            let wanted = name.to_string_lossy().to_lowercase();
-            let mut case_variant = false;
-            for entry in entries.flatten() {
-                let entry_name = entry.file_name();
-                if entry_name == name {
-                    return false;
-                }
-                if entry_name.to_string_lossy().to_lowercase() == wanted {
-                    case_variant = true;
-                }
-            }
-            case_variant
+        Ok(_) => only_case_variant(path),
+    }
+}
+
+/// True when the parent directory lists `path` only under a different case
+/// (e.g. `foo.py` after a rename from `Foo.py` on a case-insensitive volume).
+///
+/// Returns false when the exact name is listed, when no variant is listed at
+/// all, or when the directory cannot be read.
+pub(crate) fn only_case_variant(path: &Path) -> bool {
+    let (Some(name), Some(parent)) = (path.file_name(), path.parent()) else {
+        return false;
+    };
+    let Ok(entries) = std::fs::read_dir(parent) else {
+        return false;
+    };
+    let wanted = name.to_string_lossy().to_lowercase();
+    let mut case_variant = false;
+    for entry in entries.flatten() {
+        let entry_name = entry.file_name();
+        if entry_name == name {
+            return false;
+        }
+        if entry_name.to_string_lossy().to_lowercase() == wanted {
+            case_variant = true;
         }
     }
+    case_variant
 }
 
 fn compare(
