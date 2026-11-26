@@ -13,7 +13,7 @@ pub fn indexer_invocation(
     db_path: &Path,
     watch: Option<u64>,
     path_prefixes: &[PathBuf],
-) -> PythonInvocation {
+) -> Result<PythonInvocation> {
     let mut args = vec![
         "-m".to_string(),
         INDEXER_MODULE.to_string(),
@@ -74,7 +74,7 @@ pub fn spawn_indexer_with_env(
     path_prefixes: &[PathBuf],
     envs: &[(String, String)],
 ) -> Result<Child> {
-    let invocation = indexer_invocation(db_path, watch, path_prefixes);
+    let invocation = indexer_invocation(db_path, watch, path_prefixes)?;
     debug!("python_spawn: {}", invocation.display());
     let mut cmd = invocation.command();
     for (key, value) in envs {
@@ -85,7 +85,7 @@ pub fn spawn_indexer_with_env(
 }
 
 pub fn python_run_with_env(args: &[&str], envs: &[(String, String)]) -> Result<String> {
-    let invocation = python_invocation(args);
+    let invocation = python_invocation(args)?;
     debug!("python_run: {}", invocation.display());
     let mut cmd = invocation.command();
     for (key, value) in envs {
@@ -149,7 +149,8 @@ mod tests {
             Path::new("/tmp/entities.db"),
             Some(30),
             &[PathBuf::from("/repo/a"), PathBuf::from("/repo/b")],
-        );
+        )
+        .expect("tests run from inside the Organon repository");
         assert_eq!(invocation.program, "uv");
         assert!(invocation.args.ends_with(&[
             "python".to_string(),

@@ -410,7 +410,7 @@ uv run --group dev pytest
 uv run python -m ai.indexer --health
 ```
 
-The Rust CLI and MCP server invoke Python via `uv run --project <organon-root> python -m ai.<module>`. If the repo root can't be resolved from the installed binary, set `ORGANON_PYTHON_PROJECT`.
+The Rust CLI and MCP server invoke Python via `uv run --no-dev --project <organon-root> python -m ai.<module>`, run inside `<organon-root>`. The root comes from `ORGANON_PYTHON_PROJECT`, else from the location of the `organon` binary (a `setup.sh` symlink resolves to the repository). It is never taken from the current directory, so running `organon` inside another project cannot execute that project's code or create a venv in it. A binary copied out of the repository (for example from a release archive) needs `ORGANON_PYTHON_PROJECT`.
 
 ## Principles
 
